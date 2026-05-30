@@ -23,7 +23,7 @@
   "homepage": "https://magicpixel.art",
   "repository": {
     "type": "git",
-    "url": "https://github.com/magicpixel/cli.git"
+    "url": "git+https://github.com/handpoke/magicpixel-cli.git"
   },
   "bugs": {
     "url": "https://github.com/magicpixel/cli/issues"
