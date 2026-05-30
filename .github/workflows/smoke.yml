@@ -1,0 +1,57 @@
+name: Smoke test
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pack-and-install:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [18, 20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install + build
+        run: |
+          npm install
+          npm run build
+
+      - name: Pack
+        id: pack
+        shell: bash
+        run: |
+          npm pack --pack-destination .
+          VERSION=$(node -p "require('./package.json').version")
+          echo "tarball=$PWD/magicpixel-cli-$VERSION.tgz" >> "$GITHUB_OUTPUT"
+
+      - name: Install tarball in throwaway dir
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/smoke"
+          cd "$RUNNER_TEMP/smoke"
+          npm init -y > /dev/null
+          npm install "${{ steps.pack.outputs.tarball }}"
+
+      - name: magicpixel --help
+        shell: bash
+        run: cd "$RUNNER_TEMP/smoke" && npx magicpixel --help
+
+      - name: magicpixel --version
+        shell: bash
+        run: cd "$RUNNER_TEMP/smoke" && npx magicpixel --version
+
+      - name: magicpixel init -y
+        shell: bash
+        run: cd "$RUNNER_TEMP/smoke" && npx magicpixel init -y
+
+      - name: Verify magicpixel.json exists
+        shell: bash
+        run: test -f "$RUNNER_TEMP/smoke/magicpixel.json"

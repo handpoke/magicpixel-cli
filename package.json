@@ -1,0 +1,50 @@
+{
+  "name": "@magicpixel/cli",
+  "version": "0.1.0",
+  "description": "Sync MagicPixel pixel-art assets to your local project.",
+  "type": "module",
+  "bin": {
+    "magicpixel": "./dist/index.js"
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsc && node -e \"require('fs').chmodSync('dist/index.js', 0o755)\"",
+    "dev": "tsx src/index.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "magicpixel",
+    "pixel-art",
+    "cli",
+    "asset-sync",
+    "gamedev",
+    "sprites"
+  ],
+  "homepage": "https://magicpixel.art",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/magicpixel/cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/magicpixel/cli/issues"
+  },
+  "license": "MIT",
+  "author": "MagicPixel",
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "kleur": "^4.1.5",
+    "ora": "^8.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
