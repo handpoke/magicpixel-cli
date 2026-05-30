@@ -4,9 +4,13 @@
   "description": "Sync MagicPixel pixel-art assets to your local project.",
   "type": "module",
   "bin": {
-    "magicpixel": "./dist/index.js"
+    "magicpixel": "dist/index.js"
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc && node -e \"require('fs').chmodSync('dist/index.js', 0o755)\"",
     "dev": "tsx src/index.ts",
