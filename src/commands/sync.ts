@@ -11,6 +11,7 @@ import { fileSha256 } from '../util/hash.js';
 import { assetDiskPath } from '../util/paths.js';
 import { createLimit } from '../util/limit.js';
 import { emitTypedIndex } from '../util/emitIndex.js';
+import { assertPathInsideRoot, tmpPathFor } from '../util/security.js';
 
 interface SyncOpts {
   prune?: boolean;
@@ -43,18 +44,26 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
   console.log(kleur.dim(`[watch] polling every ${intervalSec}s. Ctrl+C to stop.`));
 
   let stopping = false;
+  let inFlight = false;
+  let resolveIdle: (() => void) | null = null;
+
   const onSigint = () => {
     if (stopping) return;
     stopping = true;
-    // \x1b[2K\r clears any in-flight status line before the goodbye message.
     process.stdout.write('\x1b[2K\r');
-    console.log(kleur.dim('[watch] stopped.'));
-    process.exit(0);
+    if (inFlight) {
+      // Let the current sync drain so we don't leave half-written *.tmp files
+      // or an unflushed lastSync state. Second Ctrl+C hard-exits.
+      console.log(kleur.dim('[watch] finishing current sync… (Ctrl+C again to force quit)'));
+      process.once('SIGINT', () => process.exit(130));
+    } else {
+      console.log(kleur.dim('[watch] stopped.'));
+      process.exit(0);
+    }
   };
   process.on('SIGINT', onSigint);
 
   // Run once eagerly so first sync isn't delayed by the interval.
-  let inFlight = false;
   const tick = async () => {
     if (inFlight || stopping) return;
     inFlight = true;
@@ -74,13 +83,24 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
       console.log(`\n${kleur.dim(timestamp())} ${kleur.red('!')} ${(e as Error).message.split('\n')[0]}`);
     } finally {
       inFlight = false;
+      resolveIdle?.();
+      resolveIdle = null;
     }
   };
   await tick();
   while (!stopping) {
     await new Promise((r) => setTimeout(r, intervalSec * 1000));
+    if (stopping) break;
     await tick();
   }
+  // SIGINT arrived mid-tick — wait for it to drain, then exit cleanly.
+  if (inFlight) {
+    await new Promise<void>((r) => {
+      resolveIdle = r;
+    });
+  }
+  console.log(kleur.dim('[watch] stopped.'));
+  process.exit(0);
 }
 
 async function runOnce(opts: SyncOpts): Promise<SyncResult> {
@@ -197,7 +217,8 @@ async function runOnce(opts: SyncOpts): Promise<SyncResult> {
               }
             }
             await mkdir(dirname(diskPath), { recursive: true });
-            const tmp = `${diskPath}.${process.pid}.tmp`;
+            const tmp = tmpPathFor(diskPath);
+            assertPathInsideRoot(tmp, resolve(process.cwd(), config.outDir), 'outDir');
             await writeFile(tmp, bytes);
             await rename(tmp, diskPath);
             result.downloaded++;
@@ -222,7 +243,9 @@ async function runOnce(opts: SyncOpts): Promise<SyncResult> {
 
   // Prune
   if (opts.prune && orphans.length > 0) {
+    const outRoot = resolve(process.cwd(), config.outDir);
     for (const p of orphans) {
+      assertPathInsideRoot(p, outRoot, 'outDir');
       await unlink(p);
       if (!quiet) console.log(`  ${kleur.red('-')} ${relative(process.cwd(), p)}`);
     }
@@ -302,11 +325,18 @@ function printOrphans(orphans: string[]) {
 
 async function findLocalPngs(dir: string): Promise<string[]> {
   if (!existsSync(dir)) return [];
+  const root = resolve(dir);
   const out: string[] = [];
   async function walk(d: string) {
     const entries = await readdir(d, { withFileTypes: true });
     for (const ent of entries) {
+      if (ent.isSymbolicLink()) continue;
       const full = resolve(d, ent.name);
+      try {
+        assertPathInsideRoot(full, root, 'outDir');
+      } catch {
+        continue;
+      }
       if (ent.isDirectory()) {
         await walk(full);
       } else if (ent.isFile() && ent.name.toLowerCase().endsWith('.png')) {
@@ -314,7 +344,7 @@ async function findLocalPngs(dir: string): Promise<string[]> {
       }
     }
   }
-  await walk(dir);
+  await walk(root);
   return out;
 }
 

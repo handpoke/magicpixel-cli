@@ -1,6 +1,7 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { validateEndpointUrl } from './util/security.js';
 
 const CONFIG_FILENAME = 'magicpixel.json';
 const STATE_DIR = '.magicpixel';
@@ -55,13 +56,54 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<MagicPixe
         `  Fix: open the file and check for trailing commas or quotes.`,
     );
   }
+  const include = normalizeGlobList(parsed.include ?? defaultConfig.include, 'include');
+  const exclude = normalizeGlobList(parsed.exclude ?? defaultConfig.exclude, 'exclude');
+  const outDir = typeof parsed.outDir === 'string' && parsed.outDir.trim() ? parsed.outDir.trim() : defaultConfig.outDir;
+  if (outDir.includes('\0') || outDir.split(/[/\\]/).some((seg) => seg === '..')) {
+    throw new Error(
+      `${CONFIG_FILENAME}: outDir must not contain ".." segments.\n` +
+        `  Fix: use a path like src/assets/magicpixel.`,
+    );
+  }
+  let endpoint: string | undefined;
+  if (parsed.endpoint !== undefined) {
+    if (typeof parsed.endpoint !== 'string' || !parsed.endpoint.trim()) {
+      throw new Error(`${CONFIG_FILENAME}: "endpoint" must be a non-empty string.\n  Fix: remove the field to use the default API.`);
+    }
+    endpoint = validateEndpointUrl(parsed.endpoint.trim());
+  }
+
   return {
-    outDir: parsed.outDir ?? defaultConfig.outDir,
-    include: parsed.include ?? defaultConfig.include,
-    exclude: parsed.exclude ?? defaultConfig.exclude,
-    endpoint: parsed.endpoint,
+    outDir,
+    include,
+    exclude,
+    endpoint,
     emitIndex: parsed.emitIndex ?? defaultConfig.emitIndex,
   };
+}
+
+const MAX_GLOBS = 64;
+const MAX_GLOB_LEN = 256;
+
+function normalizeGlobList(value: unknown, field: string): string[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`${CONFIG_FILENAME}: "${field}" must be an array of glob strings.`);
+  }
+  if (value.length > MAX_GLOBS) {
+    throw new Error(`${CONFIG_FILENAME}: "${field}" has too many entries (max ${MAX_GLOBS}).`);
+  }
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string' || !item.trim()) {
+      throw new Error(`${CONFIG_FILENAME}: "${field}" entries must be non-empty strings.`);
+    }
+    const g = item.trim();
+    if (g.length > MAX_GLOB_LEN || g.includes('\0')) {
+      throw new Error(`${CONFIG_FILENAME}: "${field}" entry is too long or invalid.`);
+    }
+    out.push(g);
+  }
+  return out;
 }
 
 export async function saveConfig(
@@ -87,11 +129,12 @@ export async function saveState(
 ): Promise<void> {
   const path = statePath(cwd);
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(state, null, 2) + '\n', 'utf8');
+  await writeFile(path, JSON.stringify(state, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
 }
 
 export function resolveEndpoint(config: MagicPixelConfig): string {
-  return config.endpoint ?? DEFAULT_ENDPOINT;
+  if (config.endpoint) return config.endpoint;
+  return DEFAULT_ENDPOINT;
 }
 
 export function getApiKey(): string {
@@ -105,13 +148,20 @@ export function getApiKey(): string {
         '    3. Re-run the command.',
     );
   }
-  if (!/^mp_(live|test)_/.test(key)) {
+  const trimmed = key.trim();
+  if (trimmed !== key) {
     throw new Error(
-      `MAGICPIXEL_API_KEY does not look right (expected to start with "mp_live_").\n` +
+      `MAGICPIXEL_API_KEY has leading/trailing whitespace.\n` +
+        `  Fix: export the key without spaces or quotes.`,
+    );
+  }
+  if (!/^mp_(live|test)_[a-f0-9]{64}$/.test(trimmed)) {
+    throw new Error(
+      `MAGICPIXEL_API_KEY does not look right (expected mp_live_… or mp_test_…).\n` +
         `  Fix: re-copy the key from https://magicpixel.art/settings.`,
     );
   }
-  return key;
+  return trimmed;
 }
 
 export { CLI_USER_AGENT, CLI_VERSION } from './version.js';

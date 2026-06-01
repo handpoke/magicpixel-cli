@@ -1,4 +1,10 @@
 import { resolveEndpoint, getApiKey, CLI_USER_AGENT, type MagicPixelConfig } from './config.js';
+import {
+  etagForSha256,
+  MAX_ASSET_BYTES,
+  readBodyWithLimit,
+  safeFetch,
+} from './util/security.js';
 
 export interface ManifestEntry {
   id: string;
@@ -72,7 +78,7 @@ export async function fetchManifestPage(opts: FetchManifestOpts): Promise<Manife
 
   let res: Response;
   try {
-    res = await fetch(url, { headers: authHeaders() });
+    res = await safeFetch(url.href, { headers: authHeaders() });
   } catch (e) {
     throw new Error(
       `manifest: network error (${(e as Error).message}).\n` +
@@ -119,19 +125,26 @@ export async function fetchAssetBytes(
   url.searchParams.set('key', key);
 
   const headers = authHeaders();
-  if (knownSha) headers['If-None-Match'] = `"${knownSha}"`;
+  if (knownSha) headers['If-None-Match'] = etagForSha256(knownSha);
 
   const maxAttempts = 3;
   let lastErr: Error | null = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const res = await fetch(url, { headers });
-      if (res.status === 304) return null;
-      if (res.ok) return new Uint8Array(await res.arrayBuffer());
+      const res = await safeFetch(url.href, { headers });
+      if (res.status === 304) {
+        // Drain so undici can return the socket to the keep-alive pool.
+        await res.body?.cancel();
+        return null;
+      }
+      if (res.ok) return await readBodyWithLimit(res, MAX_ASSET_BYTES);
+      // Consume the body via .text() for the error message; this also drains
+      // the stream so we don't leak the socket on retry.
+      const bodyText = await res.text();
       if (res.status === 429 || res.status >= 500) {
-        lastErr = new ApiError(res.status, friendly(res.status, await res.text(), `download ${key}`));
+        lastErr = new ApiError(res.status, friendly(res.status, bodyText, `download ${key}`));
       } else {
-        throw new ApiError(res.status, friendly(res.status, await res.text(), `download ${key}`));
+        throw new ApiError(res.status, friendly(res.status, bodyText, `download ${key}`));
       }
     } catch (e) {
       lastErr = e as Error;

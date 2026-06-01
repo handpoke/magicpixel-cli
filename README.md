@@ -21,7 +21,7 @@ npx magicpixel sync          # downloads changed assets
 npx magicpixel sync --watch  # keeps assets fresh while you work
 ```
 
-Get an API key at [magicpixel.art/settings](https://magicpixel.art/settings) → API Keys. Each key is bound to one project.
+Get an API key at [magicpixel.art/settings](https://magicpixel.art/settings) → API Keys. Each key is bound to one project. Production keys are prefixed `mp_live_`; sandbox keys (used internally for tests) are prefixed `mp_test_` and accepted the same way.
 
 The key is read **only** from the `MAGICPIXEL_API_KEY` environment variable — never from `magicpixel.json` or any other file. This is intentional: it keeps secrets out of repos and CI logs.
 
@@ -76,9 +76,13 @@ Sync is built to be cheap: a no-op run is one small manifest request, zero PNG b
 | `include`  | `string[]` | `["**/*"]`              | Globs (picomatch) matched against `folder/slug`. |
 | `exclude`  | `string[]` | `[]`                    | Globs to exclude.                                |
 | `emitIndex`| `boolean`  | `true`                  | Emit `<outDir>/index.ts` with typed asset map.   |
-| `endpoint` | `string?`  | production URL          | Override the API base (testing only).            |
+| `endpoint` | `string?`  | production URL          | Override the API base (testing only). Must be **HTTPS**. |
 
-State (`.magicpixel/state.json`) tracks `lastSync`. Add `.magicpixel/` to `.gitignore` (init offers to do this).
+State (`.magicpixel/state.json`) tracks `lastSync` (file mode `0600`). Add `.magicpixel/` to `.gitignore` (init offers to do this).
+
+### Custom endpoint (advanced)
+
+For local integration testing against `http://localhost`, set `MAGICPIXEL_ALLOW_INSECURE_ENDPOINT=1` in the environment. Do not commit custom endpoints to shared repos — `sync` warns when `endpoint` is set.
 
 ## CI usage
 

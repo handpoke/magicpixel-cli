@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-06-01
+
+### Security
+- Reject manifest `folder` / `slug` values that could escape `outDir` (`..`, `\`, null bytes); verify every write and prune stays inside `outDir`.
+- Custom `endpoint` must be HTTPS (local `http://localhost` only with `MAGICPIXEL_ALLOW_INSECURE_ENDPOINT=1`); credentials in the URL are rejected.
+- HTTP fetches follow redirects only within the same origin so an API key cannot be sent to a third party.
+- Cap per-asset download size at 64 MiB; validate `Content-Length` before buffering.
+- Sanitize `If-None-Match` to hex sha256 only; stricter `MAGICPIXEL_API_KEY` format check and whitespace trim.
+- Skip symlinks when scanning local PNGs for orphan detection; random-suffix temp files for atomic writes.
+- `.magicpixel/state.json` written with mode `0600`.
+
+### Changed
+- `whoami` now requests a full manifest page (server-capped at 1000) and reports an honest asset count instead of always showing "1+".
+- `sync --watch` waits for the in-flight sync to drain on Ctrl+C before exiting, so you never leave half-written `*.tmp` files or an unflushed `lastSync`. A second Ctrl+C still hard-quits (exit 130).
+- `emitTypedIndex` is now idempotent — when the generated `index.ts` matches what's already on disk, the file is left untouched. Stops Vite/webpack HMR from reloading on every `--watch` poll.
+- `whoami` now sends the standard `User-Agent` header (was the only command missing it).
+- README documents that both `mp_live_` and `mp_test_` key prefixes are accepted.
+- `magicpixel.json` validates `include` / `exclude` / `outDir` / `endpoint` on load; `add` / `remove` validate glob patterns.
+
+### Fixed
+- `fetchAssetBytes` drains 304 / error response bodies so undici can return sockets to the keep-alive pool (fewer socket warnings on flaky networks).
+
+
 ## [0.1.1] — 2026-05-30
 
 ### Added

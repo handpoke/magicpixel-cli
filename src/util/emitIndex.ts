@@ -1,6 +1,8 @@
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ManifestEntry } from '../api.js';
+import { assertSafeAssetSegments } from './security.js';
 
 /**
  * Emit `<outDir>/index.ts` with a typed map of every asset key → URL.
@@ -38,6 +40,7 @@ export async function emitTypedIndex(
   // by non-alphanumeric chars (e.g. `player/walk` vs `player_walk`) can't
   // collide on the JS identifier and break the consumer's TS build.
   sorted.forEach((e, i) => {
+    assertSafeAssetSegments(e.folder, e.slug, e.key);
     const rel = e.folder ? `./${e.folder}/${e.slug}.png` : `./${e.slug}.png`;
     lines.push(`import asset_${i} from ${JSON.stringify(rel)};`);
   });
@@ -52,6 +55,18 @@ export async function emitTypedIndex(
   lines.push('');
 
   const path = resolve(cwd, outDir, 'index.ts');
-  await writeFile(path, lines.join('\n'), 'utf8');
+  const next = lines.join('\n');
+
+  // Skip the write when contents are identical. Avoids triggering Vite/webpack
+  // HMR reloads on every `--watch` poll when nothing actually changed.
+  if (existsSync(path)) {
+    try {
+      const current = await readFile(path, 'utf8');
+      if (current === next) return path;
+    } catch {
+      // fall through and overwrite
+    }
+  }
+  await writeFile(path, next, 'utf8');
   return path;
 }
