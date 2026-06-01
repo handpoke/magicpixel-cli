@@ -30,7 +30,7 @@ jobs:
         run: |
           npm pack --pack-destination .
           VERSION=$(node -p "require('./package.json').version")
-          echo "tarball=$PWD/magicpixel-cli-$VERSION.tgz" >> "$GITHUB_OUTPUT"
+          echo "tarball=$PWD/magicpixelart-cli-$VERSION.tgz" >> "$GITHUB_OUTPUT"
 
       - name: Install tarball in throwaway dir
         shell: bash
@@ -65,7 +65,7 @@ jobs:
             echo "expected sync to exit non-zero without an API key" >&2
             exit 1
           fi
-          grep -q 'MAGICPIXEL_API_KEY' /tmp/out.txt
+          grep -qE 'magicpixel login|MAGICPIXEL_API_KEY' /tmp/out.txt
 
       - name: magicpixel sync rejects bad --concurrency
         shell: bash

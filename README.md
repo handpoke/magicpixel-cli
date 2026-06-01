@@ -14,27 +14,62 @@ Requires Node.js ≥ 18.
 
 ## Quickstart
 
+One command, inside your project folder (the one with `package.json`):
+
 ```bash
-npx magicpixel init          # interactive setup, detects your framework
-export MAGICPIXEL_API_KEY=mp_live_...
-npx magicpixel sync          # downloads changed assets
-npx magicpixel sync --watch  # keeps assets fresh while you work
+npx magicpixel start
 ```
 
-Get an API key at [magicpixel.art/settings](https://magicpixel.art/settings) → API Keys. Each key is bound to one project. Production keys are prefixed `mp_live_`; sandbox keys (used internally for tests) are prefixed `mp_test_` and accepted the same way.
+That walks you through everything: detects your framework, writes `magicpixel.json`, prompts for your API key (paste it from [magicpixel.art/settings](https://magicpixel.art/settings) → API Keys), pulls your sprites, and tells you how to keep them fresh.
 
-The key is read **only** from the `MAGICPIXEL_API_KEY` environment variable — never from `magicpixel.json` or any other file. This is intentional: it keeps secrets out of repos and CI logs.
+When it finishes:
+
+```bash
+npm run magicpixel:watch        # keeps sprites fresh while you edit them in MagicPixel
+```
+
+Production keys are prefixed `mp_live_`; sandbox keys (used internally for tests) are `mp_test_` and accepted the same way.
+
+### Where your key lives
+
+- **`MAGICPIXEL_API_KEY` env var** — highest priority, so CI keeps working with no code changes.
+- **`.magicpixel/credentials`** — written by `magicpixel login`, mode `0600`, automatically gitignored. This is what `start` uses for local dev.
+
+If `start` finds a `MAGICPIXEL_API_KEY` in your `.env` / `.env.local`, it offers to move it to the credentials file so it stops shipping in your bundler.
+
+### Manual setup (advanced)
+
+```bash
+npx magicpixel init           # writes magicpixel.json
+npx magicpixel login          # stores your key (or: export MAGICPIXEL_API_KEY=mp_live_...)
+npx magicpixel sync           # downloads changed assets
+npx magicpixel sync --watch   # keeps assets fresh while you work
+```
+
+### Something not working?
+
+```bash
+npx magicpixel doctor
+```
+
+Prints a one-screen diagnostic (CLI version, framework, outDir, key source, last sync, last error). Paste it to your AI agent — it's designed to be the only context they need.
+
 
 ## Typed asset index (default on)
 
 If `emitIndex` is true in `magicpixel.json`, every sync writes `<outDir>/index.ts`:
 
 ```ts
-import { MagicPixelAssets, type MagicPixelAssetKey } from '@/assets/magicpixel';
+import { MagicPixelAssets, MagicPixelAssetsById } from '@/assets/magicpixel';
 
+// Key-based: ergonomic, but breaks if you rename or move the asset in the editor.
 <img src={MagicPixelAssets['player/walk']} />
-// Typo? TypeScript error. Vite/webpack hash the URL at build time.
+
+// Id-based: survives every rename. Use for assets you don't want to chase imports for.
+<img src={MagicPixelAssetsById['abc123…']} />
 ```
+
+The index is built from what's actually on disk after each sync, so it can never disagree with the PNGs your bundler picks up. Renames are detected against the prior sync's snapshot — `sync` prints the old → new key plus the matching `MagicPixelAssetsById[...]` import hint so you can pick whichever you prefer.
 
 No bundler config, no runtime, no extra package.
 
@@ -42,8 +77,12 @@ No bundler config, no runtime, no extra package.
 
 | Command | What it does |
 | --- | --- |
-| `init [-y] [--force]` | Interactive config wizard. `-y` for CI. |
-| `sync [...flags]` | Fetch manifest, diff against disk, download changed assets. |
+| `start [--force]` | One-command bootstrap. Init + login + first sync. The only command to tell new users to run. |
+| `init [-y] [--force]` | Interactive config wizard. Offers a `magicpixel:watch` npm script. `-y` for CI. |
+| `login [--key <key>]` | Save your API key to `.magicpixel/credentials` (mode `0600`). Validates against the server first. |
+| `logout` | Remove the stored API key. |
+| `doctor` | Print a one-screen diagnostic — paste it to your AI agent when something breaks. |
+| `sync [...flags]` | Fetch manifest, diff against disk, download changed assets, prune orphans. |
 | `add <glob>` / `remove <glob>` | Manage `include` patterns. |
 | `list` | Print matching manifest as a table. |
 | `status` | Config, last sync, diff vs remote. |
@@ -54,11 +93,13 @@ No bundler config, no runtime, no extra package.
 | Flag | Meaning |
 | --- | --- |
 | `-w, --watch [seconds]` | Poll for changes (default 10s). Ideal during development. |
-| `--prune` | Delete local files no longer in the manifest. |
+| `--no-prune` | Keep local files not in the manifest (default: prune them on full syncs). |
 | `--dry-run` | Print plan, write nothing. |
 | `--full` | Ignore `lastSync`; re-fetch the full manifest. |
 | `-c, --concurrency <n>` | Parallel downloads (1–16, default 6). |
 | `-q, --quiet` | Minimal output (for CI). |
+
+Each successful sync prints a per-file change list (`+` added, `~` modified, `↪` renamed, `-` pruned) so you (and any AI agent reading the logs) know exactly what to wire up.
 
 Sync is built to be cheap: a no-op run is one small manifest request, zero PNG bytes.
 
@@ -99,7 +140,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
-      - run: npx -y @magicpixelart/cli sync --prune --quiet
+      - run: npx -y @magicpixelart/cli sync --quiet --full
         env:
           MAGICPIXEL_API_KEY: ${{ secrets.MAGICPIXEL_API_KEY }}
       - uses: peter-evans/create-pull-request@v6
@@ -123,7 +164,7 @@ Every error message includes a `Fix:` block. Common ones:
 
 | Symptom | Fix |
 | --- | --- |
-| `MAGICPIXEL_API_KEY is not set` | Export it from your shell. |
+| `No MagicPixel API key found` | Run `magicpixel login`, or `export MAGICPIXEL_API_KEY=mp_live_...`. |
 | `401` / `403` | Regenerate the key at magicpixel.art/settings. |
 | `whoami` shows 0 assets | The key is bound to an empty project. Mint a key for the project that has art. |
 | `index.ts` doesn't update | Run `sync --full` once; renames may take a full pass to propagate. |

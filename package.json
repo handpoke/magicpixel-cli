@@ -1,6 +1,6 @@
 {
   "name": "@magicpixelart/cli",
-  "version": "0.1.2",
+  "version": "0.3.0",
   "description": "Sync MagicPixel pixel-art assets to your local project.",
   "type": "module",
   "bin": {

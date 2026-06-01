@@ -2,6 +2,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { validateEndpointUrl } from './util/security.js';
+import { readCredentialsSync } from './util/credentials.js';
 
 const CONFIG_FILENAME = 'magicpixel.json';
 const STATE_DIR = '.magicpixel';
@@ -21,6 +22,11 @@ export interface MagicPixelConfig {
 
 export interface SyncState {
   lastSync?: string;
+  /** Map of manifest asset id → key, captured at the end of each successful sync.
+   *  Used for rename detection and for emitting `MagicPixelAssetsById` in `index.ts`. */
+  assets?: Record<string, string>;
+  /** Last error message surfaced by `sync` (for `magicpixel doctor`). Cleared on a clean run. */
+  lastError?: string;
 }
 
 export const defaultConfig: MagicPixelConfig = {
@@ -137,19 +143,34 @@ export function resolveEndpoint(config: MagicPixelConfig): string {
   return DEFAULT_ENDPOINT;
 }
 
+/**
+ * Read the API key. Precedence: `MAGICPIXEL_API_KEY` env var (highest, so CI
+ * can always override) > `.magicpixel/credentials` (written by `magicpixel
+ * login`). Throws a friendly error pointing at `magicpixel login` when neither
+ * source is configured.
+ */
 export function getApiKey(): string {
-  const key = process.env.MAGICPIXEL_API_KEY;
+  const fromEnv = process.env.MAGICPIXEL_API_KEY;
+  let key: string | undefined = fromEnv;
+  let source: 'env' | 'credentials-file' = 'env';
+  if (!key) {
+    const stored = readCredentialsSync();
+    if (stored) {
+      key = stored.apiKey;
+      source = 'credentials-file';
+    }
+  }
   if (!key) {
     throw new Error(
-      'MAGICPIXEL_API_KEY is not set.\n' +
+      'No MagicPixel API key found.\n' +
         '  Fix:\n' +
         '    1. Get a key at https://magicpixel.art/settings (API Keys).\n' +
-        '    2. export MAGICPIXEL_API_KEY=mp_live_...\n' +
+        '    2. Run `magicpixel login` (or `export MAGICPIXEL_API_KEY=mp_live_...`).\n' +
         '    3. Re-run the command.',
     );
   }
   const trimmed = key.trim();
-  if (trimmed !== key) {
+  if (trimmed !== key && source === 'env') {
     throw new Error(
       `MAGICPIXEL_API_KEY has leading/trailing whitespace.\n` +
         `  Fix: export the key without spaces or quotes.`,
@@ -157,8 +178,8 @@ export function getApiKey(): string {
   }
   if (!/^mp_(live|test)_[a-f0-9]{64}$/.test(trimmed)) {
     throw new Error(
-      `MAGICPIXEL_API_KEY does not look right (expected mp_live_… or mp_test_…).\n` +
-        `  Fix: re-copy the key from https://magicpixel.art/settings.`,
+      `MagicPixel API key does not look right (expected mp_live_… or mp_test_…).\n` +
+        `  Fix: run \`magicpixel login\` and paste a fresh key from https://magicpixel.art/settings.`,
     );
   }
   return trimmed;

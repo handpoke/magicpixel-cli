@@ -8,6 +8,10 @@ import { removeCommand } from './commands/remove.js';
 import { listCommand } from './commands/list.js';
 import { statusCommand } from './commands/status.js';
 import { whoamiCommand } from './commands/whoami.js';
+import { loginCommand } from './commands/login.js';
+import { logoutCommand } from './commands/logout.js';
+import { doctorCommand } from './commands/doctor.js';
+import { startCommand } from './commands/start.js';
 import { CLI_VERSION } from './version.js';
 
 // Node version guard
@@ -38,6 +42,12 @@ const wrap =
   };
 
 program
+  .command('start')
+  .description('One-command first-run setup: init + login + first sync')
+  .option('--force', 'Re-run init even if magicpixel.json exists')
+  .action(wrap(async (opts) => startCommand(opts)));
+
+program
   .command('init')
   .description('Create magicpixel.json (interactive)')
   .option('--force', 'Overwrite existing config')
@@ -45,9 +55,25 @@ program
   .action(wrap(async (opts) => initCommand(opts)));
 
 program
+  .command('login')
+  .description('Save your MagicPixel API key to .magicpixel/credentials')
+  .option('--key <key>', 'Provide the key non-interactively')
+  .action(wrap(async (opts) => loginCommand(opts)));
+
+program
+  .command('logout')
+  .description('Remove the stored MagicPixel API key')
+  .action(wrap(async () => logoutCommand()));
+
+program
+  .command('doctor')
+  .description('Print a single-page diagnostic to paste to your AI agent')
+  .action(wrap(async () => doctorCommand()));
+
+program
   .command('sync')
   .description('Download changed assets from MagicPixel')
-  .option('--prune', 'Delete local files no longer in the manifest')
+  .option('--no-prune', 'Keep local files not in the manifest (pruning is now on by default)')
   .option('--dry-run', 'Print the plan without writing files')
   .option('--full', 'Ignore lastSync state; re-fetch the full manifest')
   .option('-w, --watch [seconds]', 'Poll for changes (default 10s)', (v) => v ?? true)

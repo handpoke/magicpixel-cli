@@ -43,7 +43,7 @@ When you cut a release, rsync into the standalone repo and publish:
 ```bash
 rsync -a --delete --exclude .git --exclude node_modules --exclude dist \
   tools/cli/ ../magicpixel-cli/
-# Restore handpoke repository.url in ../magicpixel-cli/package.json if needed
+# Restore handpoke repository.url and .github/workflows/publish.yml in ../magicpixel-cli/ if needed
 cd ../magicpixel-cli && npm install && npm run build && npm publish --access public
 ```
 
