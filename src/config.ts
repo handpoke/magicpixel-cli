@@ -114,4 +114,4 @@ export function getApiKey(): string {
   return key;
 }
 
-export const CLI_USER_AGENT = `@magicpixel/cli/0.1.0 (node ${process.versions.node})`;
+export { CLI_USER_AGENT, CLI_VERSION } from './version.js';

@@ -55,3 +55,25 @@ jobs:
       - name: Verify magicpixel.json exists
         shell: bash
         run: test -f "$RUNNER_TEMP/smoke/magicpixel.json"
+
+      - name: magicpixel sync --dry-run fails cleanly without an API key
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/smoke"
+          unset MAGICPIXEL_API_KEY
+          if npx magicpixel sync --dry-run 2>&1 | tee /tmp/out.txt; then
+            echo "expected sync to exit non-zero without an API key" >&2
+            exit 1
+          fi
+          grep -q 'MAGICPIXEL_API_KEY' /tmp/out.txt
+
+      - name: magicpixel sync rejects bad --concurrency
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/smoke"
+          export MAGICPIXEL_API_KEY=mp_test_dummy
+          if npx magicpixel sync --concurrency abc 2>&1 | tee /tmp/out.txt; then
+            echo "expected sync to reject non-numeric --concurrency" >&2
+            exit 1
+          fi
+          grep -q 'concurrency' /tmp/out.txt

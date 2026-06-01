@@ -30,7 +30,7 @@ export async function initCommand(opts: InitOpts): Promise<void> {
   if (interactive) {
     const rl = createInterface({ input: stdin, output: stdout });
     try {
-      console.log(kleur.bold('Set up @magicpixel/cli'));
+      console.log(kleur.bold('Set up @magicpixelart/cli'));
       if (framework) console.log(kleur.dim(`  Detected: ${framework}`));
       console.log();
 
@@ -127,9 +127,11 @@ function isImportableOutDir(outDir: string): boolean {
 async function ensureGitignore(): Promise<boolean> {
   const path = resolve(process.cwd(), '.gitignore');
   const marker = '.magicpixel/';
+  // Accept any of these as "already ignored" so we don't append a duplicate.
+  const equivalents = new Set(['.magicpixel', '.magicpixel/', '/.magicpixel', '/.magicpixel/']);
   if (existsSync(path)) {
     const current = await readFile(path, 'utf8');
-    if (current.split('\n').some((l) => l.trim() === marker)) return false;
+    if (current.split('\n').some((l) => equivalents.has(l.trim()))) return false;
     await appendFile(path, (current.endsWith('\n') ? '' : '\n') + `\n# MagicPixel CLI state\n${marker}\n`);
     return true;
   }

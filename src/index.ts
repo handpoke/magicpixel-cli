@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Command } from 'commander';
+import { Command, InvalidArgumentError } from 'commander';
 import kleur from 'kleur';
 import { initCommand } from './commands/init.js';
 import { syncCommand } from './commands/sync.js';
@@ -8,6 +8,7 @@ import { removeCommand } from './commands/remove.js';
 import { listCommand } from './commands/list.js';
 import { statusCommand } from './commands/status.js';
 import { whoamiCommand } from './commands/whoami.js';
+import { CLI_VERSION } from './version.js';
 
 // Node version guard
 const major = Number(process.versions.node.split('.')[0]);
@@ -21,7 +22,7 @@ const program = new Command();
 program
   .name('magicpixel')
   .description('Sync MagicPixel pixel-art assets to your local project')
-  .version('0.1.0');
+  .version(CLI_VERSION);
 
 const wrap =
   <T extends unknown[]>(fn: (...a: T) => Promise<void>) =>
@@ -51,7 +52,13 @@ program
   .option('--full', 'Ignore lastSync state; re-fetch the full manifest')
   .option('-w, --watch [seconds]', 'Poll for changes (default 10s)', (v) => v ?? true)
   .option('-q, --quiet', 'Minimal output (for CI)')
-  .option('-c, --concurrency <n>', 'Parallel downloads (1–16, default 6)', (v) => parseInt(v, 10))
+  .option('-c, --concurrency <n>', 'Parallel downloads (1–16, default 6)', (v) => {
+    const n = parseInt(v, 10);
+    if (!Number.isFinite(n) || String(n) !== v.trim() || n < 1 || n > 16) {
+      throw new InvalidArgumentError(`expected an integer 1–16, got "${v}".`);
+    }
+    return n;
+  })
   .action(wrap(async (opts) => syncCommand(opts)));
 
 program

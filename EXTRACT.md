@@ -1,4 +1,4 @@
-# Extracting @magicpixel/cli into its own repo
+# Extracting @magicpixelart/cli into its own repo
 
 This package currently lives at `tools/cli/` inside the editor monorepo for
 convenience. It has **zero coupling** to the editor app — no shared imports,
@@ -14,7 +14,7 @@ cd ../magicpixel-cli
 # 2. Fresh git history
 git init
 git add .
-git commit -m "Initial commit: @magicpixel/cli 0.1.0"
+git commit -m "Initial commit: @magicpixelart/cli 0.1.0"
 
 # 3. Install + build + smoke test
 npm install
@@ -32,13 +32,23 @@ npm publish --access public
 
 ## After publish
 
-- Update `tools/cli/package.json` `repository.url` if the GitHub slug differs.
-- Update the editor's `/guides/sync-setup` page if it references "coming soon".
-- Delete `tools/cli/` from the editor repo (this directory) once published —
-  keeping two copies will drift.
+- Canonical repo: [github.com/handpoke/magicpixel-cli](https://github.com/handpoke/magicpixel-cli)
+- npm: [@magicpixelart/cli](https://www.npmjs.com/package/@magicpixelart/cli)
+
+## Keeping two copies in sync
+
+`tools/cli/` stays in the editor monorepo for edits in external tools (Lovable, etc.).
+When you cut a release, rsync into the standalone repo and publish:
+
+```bash
+rsync -a --delete --exclude .git --exclude node_modules --exclude dist \
+  tools/cli/ ../magicpixel-cli/
+# Restore handpoke repository.url in ../magicpixel-cli/package.json if needed
+cd ../magicpixel-cli && npm install && npm run build && npm publish --access public
+```
 
 ## Updating the editor's pinned reference
 
 The editor doesn't import the CLI — only the `/guides/sync-setup` page
-references it by name. Search for `@magicpixel/cli` in `src/` and update any
+references it by name. Search for `@magicpixelart/cli` in `src/` and update any
 install snippets if the npm name changes.

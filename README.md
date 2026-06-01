@@ -1,13 +1,13 @@
-# @magicpixel/cli
+# @magicpixelart/cli
 
 Sync MagicPixel pixel-art assets to your local project as flattened PNGs. Zero runtime — just files on disk that your bundler picks up.
 
 ## Install
 
 ```bash
-npm install --save-dev @magicpixel/cli
-# or: pnpm add -D @magicpixel/cli
-# or: bun add -d @magicpixel/cli
+npm install --save-dev @magicpixelart/cli
+# or: pnpm add -D @magicpixelart/cli
+# or: bun add -d @magicpixelart/cli
 ```
 
 Requires Node.js ≥ 18.
@@ -22,6 +22,8 @@ npx magicpixel sync --watch  # keeps assets fresh while you work
 ```
 
 Get an API key at [magicpixel.art/settings](https://magicpixel.art/settings) → API Keys. Each key is bound to one project.
+
+The key is read **only** from the `MAGICPIXEL_API_KEY` environment variable — never from `magicpixel.json` or any other file. This is intentional: it keeps secrets out of repos and CI logs.
 
 ## Typed asset index (default on)
 
@@ -93,7 +95,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
-      - run: npx -y @magicpixel/cli sync --prune --quiet
+      - run: npx -y @magicpixelart/cli sync --prune --quiet
         env:
           MAGICPIXEL_API_KEY: ${{ secrets.MAGICPIXEL_API_KEY }}
       - uses: peter-evans/create-pull-request@v6

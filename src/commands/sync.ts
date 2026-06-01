@@ -1,5 +1,6 @@
 import kleur from 'kleur';
 import ora, { type Ora } from 'ora';
+import { createHash } from 'node:crypto';
 import { mkdir, writeFile, unlink, readdir, rm, rename } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
@@ -40,15 +41,26 @@ export async function syncCommand(opts: SyncOpts): Promise<void> {
 async function watchLoop(opts: SyncOpts): Promise<void> {
   const intervalSec = typeof opts.watch === 'string' ? Math.max(2, parseInt(opts.watch, 10) || 10) : 10;
   console.log(kleur.dim(`[watch] polling every ${intervalSec}s. Ctrl+C to stop.`));
+
+  let stopping = false;
+  const onSigint = () => {
+    if (stopping) return;
+    stopping = true;
+    // \x1b[2K\r clears any in-flight status line before the goodbye message.
+    process.stdout.write('\x1b[2K\r');
+    console.log(kleur.dim('[watch] stopped.'));
+    process.exit(0);
+  };
+  process.on('SIGINT', onSigint);
+
   // Run once eagerly so first sync isn't delayed by the interval.
   let inFlight = false;
   const tick = async () => {
-    if (inFlight) return;
+    if (inFlight || stopping) return;
     inFlight = true;
     try {
       const r = await runOnce({ ...opts, quiet: true, watch: false });
       if (r.downloaded > 0 || r.pruned > 0) {
-        // \x1b[2K\r clears any residual "no changes" line from the previous tick.
         process.stdout.write('\x1b[2K\r');
         console.log(
           `${kleur.dim(timestamp())} ${kleur.green('✓')} ${r.downloaded} downloaded` +
@@ -65,8 +77,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
     }
   };
   await tick();
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
+  while (!stopping) {
     await new Promise((r) => setTimeout(r, intervalSec * 1000));
     await tick();
   }
@@ -78,6 +89,12 @@ async function runOnce(opts: SyncOpts): Promise<SyncResult> {
   const startedAt = new Date().toISOString();
   const concurrency = Math.max(1, Math.min(opts.concurrency ?? 6, 16));
   const quiet = !!opts.quiet;
+
+  // Warn loudly when a custom endpoint is configured — easy to forget a test
+  // override before committing magicpixel.json to a real repo / CI.
+  if (!quiet && config.endpoint) {
+    console.log(kleur.yellow(`! using custom endpoint: ${config.endpoint}`));
+  }
 
   // Incremental: only fetch what changed since last successful sync.
   // --full forces a from-scratch fetch.
@@ -169,6 +186,16 @@ async function runOnce(opts: SyncOpts): Promise<SyncResult> {
           if (bytes === null) {
             result.unchanged++;
           } else {
+            // Verify the payload matches what the manifest advertised. Guards
+            // against silently writing a corrupted body to disk.
+            if (entry.sha256) {
+              const actual = createHash('sha256').update(bytes).digest('hex');
+              if (actual !== entry.sha256) {
+                throw new Error(
+                  `sha256 mismatch (expected ${entry.sha256.slice(0, 12)}…, got ${actual.slice(0, 12)}…)`,
+                );
+              }
+            }
             await mkdir(dirname(diskPath), { recursive: true });
             const tmp = `${diskPath}.${process.pid}.tmp`;
             await writeFile(tmp, bytes);

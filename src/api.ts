@@ -91,12 +91,19 @@ export async function fetchAllManifest(
 ): Promise<ManifestEntry[]> {
   const out: ManifestEntry[] = [];
   let cursor: string | undefined;
-  do {
-    const page = await fetchManifestPage({ config, since, cursor, limit: 500 });
-    out.push(...page.items);
-    cursor = page.nextCursor ?? undefined;
-  } while (cursor);
-  return out;
+  // Cycle guard: caps total pages so a buggy server cursor can't hang the CLI.
+  // At 500 entries/page this is 100k assets — well past any realistic project.
+  const MAX_PAGES = 200;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const res = await fetchManifestPage({ config, since, cursor, limit: 500 });
+    out.push(...res.items);
+    cursor = res.nextCursor ?? undefined;
+    if (!cursor) return out;
+  }
+  throw new Error(
+    `manifest: pagination exceeded ${MAX_PAGES} pages — possible server cursor loop.\n` +
+      `  Fix: re-run with --full, or report at https://github.com/magicpixel/cli/issues.`,
+  );
 }
 
 /**

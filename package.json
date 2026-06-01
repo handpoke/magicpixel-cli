@@ -1,16 +1,12 @@
 {
-  "name": "@magicpixel/cli",
-  "version": "0.1.0",
+  "name": "@magicpixelart/cli",
+  "version": "0.1.1",
   "description": "Sync MagicPixel pixel-art assets to your local project.",
   "type": "module",
   "bin": {
-    "magicpixel": "dist/index.js"
+    "magicpixel": "./dist/index.js"
   },
-  "files": [
-    "dist",
-    "README.md",
-    "LICENSE"
-  ],
+  "files": ["dist", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsc && node -e \"require('fs').chmodSync('dist/index.js', 0o755)\"",
     "dev": "tsx src/index.ts",
@@ -30,7 +26,7 @@
     "url": "git+https://github.com/handpoke/magicpixel-cli.git"
   },
   "bugs": {
-    "url": "https://github.com/magicpixel/cli/issues"
+    "url": "https://github.com/handpoke/magicpixel-cli/issues"
   },
   "license": "MIT",
   "author": "MagicPixel",
