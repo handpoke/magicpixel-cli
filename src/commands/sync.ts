@@ -48,7 +48,13 @@ export async function syncCommand(opts: SyncOpts): Promise<void> {
 }
 
 async function watchLoop(opts: SyncOpts): Promise<void> {
-  const intervalSec = typeof opts.watch === 'string' ? Math.max(2, parseInt(opts.watch, 10) || 10) : 10;
+  // Default 2s — matches the perceived-instant UX users expect when editing
+  // sprites in MagicPixel and watching them refresh in their game's dev
+  // server. Incremental polls send `?since=<lastSync>` so an empty manifest
+  // round-trip is cheap (a single HTTP HEAD-sized response with `count: 0`).
+  // Floor stays at 2s to keep accidental thrashing in check; users who need
+  // less can pass `--watch 5`.
+  const intervalSec = typeof opts.watch === 'string' ? Math.max(2, parseInt(opts.watch, 10) || 2) : 2;
 
   // Header — print once on start. Project/asset count is best-effort; if the
   // first manifest fetch fails we still want the loop to come up and retry.
@@ -70,6 +76,12 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
   let resolveIdle: (() => void) | null = null;
   let backoffSec = intervalSec;
   let pausedForAuth = false;
+  // Adaptive idle backoff: after a few minutes of nothing-to-do we slow the
+  // poll from 2s → 5s → 10s so a dev who walked away isn't hammering the
+  // manifest endpoint. ANY change OR error resets this back to intervalSec,
+  // so the "edit → see it" promise stays intact the moment the user comes
+  // back. Error backoff (2→60s) is separate and continues to win.
+  let consecutiveIdleTicks = 0;
 
   const onSigint = () => {
     if (stopping) return;
@@ -94,6 +106,16 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
       backoffSec = intervalSec;
       pausedForAuth = false;
       const changedCount = r.added.length + r.modified.length + r.removed.length + r.renamed.length;
+      if (changedCount > 0) {
+        // Snap back to the fast interval the moment anything changes.
+        consecutiveIdleTicks = 0;
+        backoffSec = intervalSec;
+      } else {
+        consecutiveIdleTicks++;
+        // Thresholds in *ticks*; at intervalSec=2 these are ~3 min and ~15 min.
+        if (consecutiveIdleTicks >= 300) backoffSec = Math.max(intervalSec, 10);
+        else if (consecutiveIdleTicks >= 90) backoffSec = Math.max(intervalSec, 5);
+      }
       if (opts.quiet) return;
       if (changedCount > 0) {
         process.stdout.write('\x1b[2K\r');
@@ -111,6 +133,8 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
       const apiErr = err instanceof ApiError ? err : null;
       const firstLine = err.message.split('\n')[0];
       process.stdout.write('\x1b[2K\r');
+      // Any error breaks the idle streak so we come back fast once it clears.
+      consecutiveIdleTicks = 0;
 
       if (apiErr && (apiErr.status === 401 || apiErr.status === 403)) {
         if (!pausedForAuth) {

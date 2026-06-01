@@ -1,4 +1,4 @@
-import { resolveEndpoint, getApiKey, CLI_USER_AGENT, type MagicPixelConfig } from './config.js';
+import { resolveEndpoint, getApiKey, CLI_USER_AGENT, CLI_VERSION, type MagicPixelConfig } from './config.js';
 import {
   etagForSha256,
   MAX_ASSET_BYTES,
@@ -88,7 +88,40 @@ export async function fetchManifestPage(opts: FetchManifestOpts): Promise<Manife
   if (!res.ok) {
     throw new ApiError(res.status, friendly(res.status, await res.text(), 'manifest'));
   }
+  // Hint to nudge stale CLIs. Printed once per process by sync.ts.
+  const minCli = res.headers.get('x-magicpixel-min-cli-version');
+  if (minCli) maybeWarnStaleCli(minCli);
   return (await res.json()) as ManifestResponse;
+}
+
+// ----- Stale-CLI nudge ------------------------------------------------------
+// Cheap version comparison: split on dots, compare numerically. Pre-release
+// tags are ignored (treated as equal to their base) to avoid spamming devs
+// running unpublished builds.
+let staleWarned = false;
+function maybeWarnStaleCli(minVersion: string): void {
+  if (staleWarned) return;
+  const current = (CLI_VERSION || '').split('-')[0];
+  const min = (minVersion || '').split('-')[0];
+  if (!current || !min) return;
+  if (compareSemver(current, min) >= 0) return;
+  staleWarned = true;
+  // Use stderr so the message survives piping but doesn't pollute structured
+  // stdout consumers.
+  console.warn(
+    `\n[magicpixel] CLI ${current} is older than the recommended ${min}.\n` +
+      `  Fix: npm i -D @magicpixelart/cli@latest (or @magicpixelart/vite)\n`,
+  );
+}
+
+function compareSemver(a: string, b: string): number {
+  const pa = a.split('.').map((n) => parseInt(n, 10) || 0);
+  const pb = b.split('.').map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
 }
 
 export async function fetchAllManifest(
@@ -129,6 +162,7 @@ export async function fetchAssetBytes(
 
   const maxAttempts = 3;
   let lastErr: Error | null = null;
+  let retryAfterMs = 0; // populated from Retry-After when present
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const res = await safeFetch(url.href, { headers });
@@ -142,6 +176,10 @@ export async function fetchAssetBytes(
       // the stream so we don't leak the socket on retry.
       const bodyText = await res.text();
       if (res.status === 429 || res.status >= 500) {
+        // Honor Retry-After (seconds). Cap at 60s so a bogus header can't hang
+        // the CLI; fall back to exponential backoff when missing/invalid.
+        const ra = parseRetryAfterSeconds(res.headers.get('retry-after'));
+        if (ra > 0) retryAfterMs = Math.min(ra * 1000, 60_000);
         lastErr = new ApiError(res.status, friendly(res.status, bodyText, `download ${key}`));
       } else {
         throw new ApiError(res.status, friendly(res.status, bodyText, `download ${key}`));
@@ -151,8 +189,23 @@ export async function fetchAssetBytes(
       if (e instanceof ApiError && e.status < 500 && e.status !== 429) throw e;
     }
     if (attempt < maxAttempts) {
-      await new Promise((r) => setTimeout(r, 250 * 2 ** (attempt - 1)));
+      const backoffMs = 250 * 2 ** (attempt - 1);
+      await new Promise((r) => setTimeout(r, Math.max(retryAfterMs, backoffMs)));
+      retryAfterMs = 0;
     }
   }
   throw lastErr ?? new Error(`download ${key}: unknown error`);
+}
+
+/** Retry-After may be seconds or an HTTP-date (RFC 7231). Accept both. */
+function parseRetryAfterSeconds(raw: string | null): number {
+  if (!raw) return 0;
+  const trimmed = raw.trim();
+  const n = Number(trimmed);
+  if (Number.isFinite(n) && n > 0) return n;
+  const asDate = Date.parse(trimmed);
+  if (!Number.isNaN(asDate)) {
+    return Math.max(0, Math.ceil((asDate - Date.now()) / 1000));
+  }
+  return 0;
 }

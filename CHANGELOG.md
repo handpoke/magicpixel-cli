@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-06-01
+
+### Added
+- **Honor `Retry-After` on 429.** When the server rate-limits a download, the
+  CLI now waits for the duration the server suggests (capped at 60s) before
+  retrying instead of using its own fixed 250ms exponential backoff.
+- **Stale-version nudge.** The CLI reads `X-MagicPixel-Min-CLI-Version` from
+  manifest responses and prints a one-time hint when it's running an older
+  version, pointing at `npm i -D @magicpixelart/cli@latest`.
+
+## [0.3.2] — 2026-06-01
+
+### Changed
+- **`sync --watch` now backs off when idle.** After ~3 min of nothing-to-do the
+  poll relaxes from 2s → 5s, and after ~15 min → 10s, so a dev who walked away
+  isn't hammering the manifest endpoint. Any change *or* error snaps it back to
+  the fast interval immediately, so the "edit → see it" promise is intact the
+  moment you come back. Configurable floor still set by `--watch <seconds>`.
+
+## [0.3.1] — 2026-06-01
+
+### Changed
+- **`sync --watch` polls every 2s by default** (was 10s). Edits in MagicPixel
+  now appear in your project within ~2s without you running `magicpixel sync`.
+  Incremental polls send `?since=<lastSync>` so empty ticks are a cheap
+  no-op manifest round-trip. Pass `--watch 5` (or any value ≥ 2) to slow it
+  down if needed.
+
+
 ## [0.3.0] — 2026-06-01
 
 This release rolls in the 0.2.0 polish (see below) and adds a first-run onboarding flow built for people who have never used a CLI.
