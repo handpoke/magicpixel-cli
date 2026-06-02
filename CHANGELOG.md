@@ -7,6 +7,276 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **`sync --watch 1` silently coerced to 2.** The commander validator
+  accepted `1–3600` but the watch loop enforced a 2s floor via
+  `Math.max(2, …)`, so `--watch 1` quietly ran at 2s with no warning.
+  Validator and loop now agree on `2–3600`; passing `1` fails fast with
+  `expected an integer 2–3600 (seconds)`.
+- **`magicpixel start` printed "You're set up ✨" after a failed first
+  sync.** `syncCommand` sets `process.exitCode = 1` on download failures
+  without throwing — same misleading-success pattern we previously fixed
+  in `repair`. `start` now snapshots `process.exitCode` around the first
+  sync and prints a yellow "first sync completed with errors" line
+  (pointing at `magicpixel sync` and `magicpixel doctor`) when a fresh
+  non-zero exit code is set. The watch-script hint still prints either
+  way so the user knows how to retry.
+- **Watch-tick `(other)` and `(network)` errors lost the request id.**
+  Friendly `ApiError` messages put `(request id: …)` on a second line, so
+  the `firstLine` we logged for non-auth tick failures dropped it. Both
+  branches now suffix the request id when the underlying error is an
+  `ApiError` — matching what the auth-pause branch has always done.
+- **`whoami` could print a negative asset count** if a malformed server
+  response returned `count: -5`. Shape guard now clamps to `Math.max(0, …)`
+  and floors to an integer.
+
+### Internal
+- New `reportAndExit(err, command, exitCode)` in `util/telemetry.ts`.
+  Collapses the duplicated lazy-import + best-effort-config ceremony that
+  used to live in both `wrap()` (index.ts, exit 1) and the watch
+  give-up branch (sync.ts, exit 2). One source of truth for the
+  fork-endpoint guard and any future flush-pending-spans hook.
+
+### Tests
+- 119 → 130 passing. New coverage: `whoami` negative-count clamp, and
+  `parseWatchInterval` / `parseConcurrency` validators (extracted to
+  `util/flagValidators.ts` so they unit-test in-process without spawning
+  a subprocess — bare `-w` boolean form, lower/upper bounds, non-integer
+  and out-of-range rejection).
+
+## [0.4.0] — 2026-06-02
+
+Production hardening pass. Reliability, self-healing, traceability, and
+significant onboarding polish — no breaking changes for callers on 0.3.x.
+
+### Added
+- **Opt-out CLI error telemetry.** Unexpected failures (5xx server errors and
+  uncaught exceptions) are reported fire-and-forget to a new
+  `log-cli-error` edge function so they surface on `/admin/errors` alongside
+  browser crashes. Authenticated by your API key, never blocking, 2s timeout,
+  per-message dedupe. Skipped when no key is configured, when pointed at a
+  non-canonical endpoint, or when `MAGICPIXEL_TELEMETRY=0`. User-fixable
+  errors (missing config, bad key, ENOENT/EACCES, commander arg errors,
+  401/403/404/429) are filtered out client-side and never reported.
+- **`magicpixel repair`** — one-shot self-healing command. Validates the API
+  key, quarantines `state.json`, prunes empty subdirs under `outDir`, and runs
+  a full sync. `--dry-run` previews; `--yes` skips the prompt. The dry-run
+  output lists the actual paths it would quarantine and the empty subdirs it
+  would remove (capped at 10 + “…and N more”). If the underlying sync exits
+  non-zero the final line reports “completed with errors” instead of a green
+  check.
+- **`magicpixel doctor --json`** — stable, machine-readable diagnostic report
+  (no ANSI). Pipeable into `jq` or pasted verbatim into an LLM. Never includes
+  the API key, only its source. New `--offline` flag skips the live manifest
+  probe for users behind a strict proxy. The `network` field uses a
+  discriminated shape: `{ skipped: 'offline' | 'no-api-key' }` when no probe
+  ran, `{ ok, status, roundtripMs, requestId, error }` when one did — so JSON
+  consumers can branch on `network.skipped` instead of mis-reading a probe
+  skip as a network failure.
+- **`magicpixel doctor` actively probes** the manifest endpoint with a 5s
+  timeout. Reports HTTP status, roundtrip ms, and the `X-Request-Id` the
+  server echoed.
+- **`X-Request-Id` echo end-to-end.** The CLI mints a uuid for every request
+  via a shared `authHeaders` helper (one source of truth for the
+  `Authorization` / `User-Agent` / `X-Request-Id` triple); the edge function
+  echoes it on every response (success + error). 401/403 and other API
+  errors now suffix `(request id: …)` so support can grep edge logs in one
+  shot.
+- **Friendly EACCES/EPERM/EROFS/EBUSY messages.** Asset writes and
+  `state.json` saves surface multi-line, action-oriented diagnostics (“close
+  OneDrive”, “chmod -R u+w …”) instead of raw libc errors.
+- **Watch-loop resume message.** After an auth-pause clears (the user ran
+  `magicpixel login` in another terminal), the watcher logs
+  `✓ Key accepted again — resuming.` instead of silently picking up.
+- **`sync --watch` exits with code `2`** after 5 consecutive 401/403s so
+  parent processes (Vite plugin, systemd, pm2) can detect a genuinely
+  revoked key rather than a transient blip. A successful tick resets the
+  counter. Non-auth failures don’t count toward the streak, so a flaky
+  network interleaved with a stale 401 can’t sneak past the threshold.
+- **Per-command `--help` examples** via `commander`’s `addHelpText`. Each
+  command ships a 2-line example block ready to paste to an AI agent.
+- **README “Production checklist”** pointing at `doctor`, `repair`,
+  `--offline`, watcher exit codes, and `X-Request-Id` grepping.
+- **`AGENTS.md` is always written**, regardless of `emitIndex` — `public/`
+  and `static/` users now get a snippet that uses the correct absolute URL
+  form (`<img src="/magicpixel/items/tree.png" />`) instead of a broken
+  bundler-relative `import` path.
+
+### Fixed
+- **`sync --watch` Ctrl+C waited out the full backoff before exiting.** When
+  a signal arrived during the idle sleep the watcher slept up to 60s (the
+  error-backoff ceiling) before re-checking `stopping`. The sleep is now
+  cancellable: `onStopSignal` calls `wakeStop()` and the loop exits within a
+  tick.
+- **`magicpixel whoami` ignored `Retry-After` on 429.** Every other call site
+  passed `retryAfterMsFromResponse(res)` to `ApiError`; `whoami` dropped it,
+  burning through retries in ~750ms instead of waiting the server-suggested
+  window. Now honours the header (helper exported from `api.ts`).
+- **`magicpixel init` patched `package.json` non-atomically.** A crash
+  between write and flush could corrupt `package.json`. Now uses the shared
+  `atomicWrite` (stage-tmp + rename) helper, same pattern as `state.json`
+  and the asset download path.
+- **`[watch] stopped.` printed under `--quiet`.** The termination line now
+  honours the quiet contract so CI consumers capturing watcher output get a
+  clean stream.
+- **`sync --watch` ignored SIGTERM.** Only `SIGINT` (Ctrl+C) was handled, so
+  `kill <pid>`, `docker stop`, systemd, and pm2 killed the watcher mid-sync
+  without draining in-flight work or preserving the exit code. Both signals
+  now share a single `onStopSignal` handler; second signal force-exits with
+  the conventional code (130 for SIGINT, 143 for SIGTERM).
+- **`sync --watch` went silent after the first network blip.** Once backoff
+  doubled past 30s the offline message was suppressed entirely, so a user
+  returning to the terminal saw no signal at all. The message now prints
+  every time backoff changes (and the next successful tick prints a single
+  “Back online — resuming.” line, mirroring the auth-recovery pattern).
+- **`magicpixel repair` could mis-report success.** The exit-code comparison
+  used raw inequality on `process.exitCode`, so a sync failure that re-set
+  it to `1` after a prior `1` looked like success. Now snapshots
+  `process.exitCode ?? 0` and compares `>`, honouring any fresh non-zero.
+- **`assertKeyValid` read unbounded error bodies.** A misbehaving server
+  returning a multi-MB 500 page would buffer it entirely just to slice 120
+  chars. Now capped at 16 KB via `readBodyWithLimit`.
+- **`magicpixel status` falsely reported “key not set”** when the user had
+  logged in via `magicpixel login` (file-backed). Now honors the same
+  precedence as `getApiKey()` and labels the source.
+- **`magicpixel status` / `whoami` worked only with a project config.** Both
+  now fall back to defaults when `magicpixel.json` is missing, so a brand-new
+  user can `magicpixel whoami` to validate a key before bothering with init.
+- **`magicpixel start` couldn’t recover from a broken `magicpixel.json`.** It
+  used to skip init on `existsSync` and then crash deep inside `syncCommand`.
+  It now tries `loadConfig` first and prints the friendly error with a
+  `magicpixel init --force` hint when the file is malformed.
+- **`sync --watch` idle backoff was measured in *ticks*, not seconds.** At
+  `--watch 10`, the first slowdown waited 15 minutes (90 ticks) and the
+  second 50 minutes (300 ticks) instead of the documented ~3 / ~15 min.
+  Thresholds are now elapsed-seconds and behave the same at any interval.
+- **`sync --watch` graceful stop overwrote `process.exitCode`.** A failed
+  download earlier in the loop set `exitCode = 1`; the post-loop
+  `process.exit(0)` then zeroed it out. The watcher now preserves any prior
+  exit code on graceful stop and on SIGINT.
+- **304 responses now credit `bytesSaved`.** A steady-state sync (all assets
+  unchanged via ETag) used to report `~0 B saved`; it now reports the
+  manifest’s reported byte total.
+- **`magicpixel.json` shape validation** at load time. Hand-edited configs
+  with wrong types (e.g. `include: "**/*"` instead of `["**/*"]`, or
+  `emitIndex: "true"`) surface friendly multi-line errors pointing at the
+  offending field instead of cryptic TypeErrors deep in glob matching.
+- **`assertSafeOutDir` rejects absolute paths and `..` segments** at both
+  `init` prompt-time and `loadConfig` file-time — single helper, single
+  policy. Previously an absolute `outDir` could escape the cwd-relative
+  containment check.
+- **`fetchAllManifest` / `fetchAssetBytes` shape-validate the manifest JSON.**
+  A malformed edge response (`{items: null}`, non-string `nextCursor`, etc.)
+  used to crash with `TypeError: null is not iterable` mid-pagination; now
+  surfaces a friendly `ApiError(502, …)` carrying the request id.
+- **`fetchAllManifest` detects stuck cursors in O(1) round-trips.** A buggy
+  server that returns the same `nextCursor` twice now aborts immediately
+  instead of burning the 200-page budget.
+- **`assertKeyValid` + `whoami` retry transient failures.** A single 503 or
+  network blip during onboarding used to kick the user back to “paste your
+  key again”, and `whoami` would falsely report “rejected”. Both now retry
+  5xx/429 with `Retry-After` honoring; hard 4xx still bubble immediately.
+- **`magicpixel repair` final line** no longer claims success when the
+  underlying `sync` set a non-zero exit code without throwing.
+- **`init` validates outDir at input time** with a re-prompt loop, instead of
+  letting `loadConfig` reject it on the next `sync` / `status`.
+- **`maxIsoTimestamp`** requires strict ISO-8601 (matches the edge function’s
+  regex), so loose `Date.parse`-able inputs can’t silently rewind `lastSync`.
+- **`sync --watch` default documented correctly.** Help text and README said
+  10s but the actual default is 2s (intentional — perceived-instant UX).
+  Docs now reflect 2s + adaptive idle backoff.
+- **`sync -w <bad>` no longer silently coerces to 2s.** Commander now
+  validates the watch interval (`InvalidArgumentError` for non-integers and
+  out-of-range values, 1–3600s). The bare boolean form (`-w` with no arg)
+  still defaults to 2s.
+- **Watcher network-error detection** now also matches `ENETUNREACH`,
+  `EHOSTUNREACH`, and `502/504` upstream-gateway text so corporate-proxy
+  blips back off correctly instead of being treated as auth failures.
+- **`magicpixel list` size column** now formats bytes as `KB` / `MB` instead
+  of dumping raw byte counts (`1234567B`). Shares the same `formatBytes`
+  helper as `sync`.
+- **`magicpixel whoami` shape-guards the manifest response** the same way
+  `fetchAllManifest` does. A malformed `{ items: null }` body now reports
+  "0 assets" with the request id rather than throwing `TypeError`.
+- **`findKeyInDotenv` regex anchored on the exact key name.** Sibling vars
+  like `MAGICPIXEL_API_KEY_OLD` or `MAGICPIXEL_API_KEY_BACKUP` no longer
+  match and return the wrong value. Also tolerates `export ` prefix and
+  inline `# comment` trailing the value.
+- **`magicpixel repair --dry-run`** now predicts the step-2 skip a real
+  run would hit on non-TTY without `--yes`, prints a yellow `note`, and
+  closes with "would skip the state reset" instead of an unconditional
+  green check.
+- **`magicpixel start` no longer instructs users to run an npm script
+  they don't have.** When `init` couldn't patch `package.json` the final
+  hint falls back to `npx magicpixel sync --watch`. The concurrently tip
+  follows the same branch.
+- **`retryTransient` wraps network failures with `{ cause }`** so the
+  underlying transport error keeps its stack for debugging.
+- **`validateEndpointUrl` uses an explicit scheme allowlist** (`https:` /
+  `http:` for localhost). `file:`, `data:`, `javascript:`, etc. now get a
+  clear "scheme not allowed" message instead of the generic HTTPS error.
+
+### Changed
+- **`magicpixel status` Diff vs remote** now parallelizes the per-asset SHA
+  check through the shared concurrency pool (matches the `sync` diff loop).
+- **`sync.runOnce` parallel disk-SHA pre-check** using the same
+  `createLimit(concurrency)` pool as downloads (default 6 in flight). On a
+  1k-asset all-unchanged sync this is the dominant wall-clock cost.
+- **`sync.runOnce` caches `assetDiskPath` and per-entry SHA** in maps reused
+  across the diff / orphan / download loops. Saves three resolves + two
+  security asserts per asset and, on the download path, avoids re-hashing
+  the same file moments after the pre-check.
+- **`sync` orphan-prune message no longer reads inverted** when `--no-prune`
+  is passed.
+
+### Internal
+- New `util/framework.isStaticOutDir` — single predicate for "is outDir
+  served as a static asset?", used by `init` (skip typed index) and
+  `emitIndex` (emit absolute-URL AGENTS.md snippet). Replaces two copies of
+  the same regex.
+- New `nextBackoffForIdle` exported from `sync.ts` — pure helper used by
+  the watch loop's idle backoff math; testable in isolation.
+- New `util/authHeaders.ts` — one source of truth for the Authorization +
+  User-Agent + X-Request-Id triple (4 call sites collapsed).
+- New `util/iso.ts` — `STRICT_ISO_8601_RE`, `isStrictIso8601`,
+  `maxIsoTimestamp` extracted from `sync.ts`.
+- New `util/security.assertSafeOutDir` — single trim+validate helper used by
+  both `init` and `loadConfig`.
+- New `util/paths.walkOutDirPngs` — single canonical disk walker for PNGs
+  under outDir, replacing the two near-identical implementations that used
+  to live in `sync.ts` and `emitIndex.ts`.
+- New `util/paths.listEmptyDirs` — DFS post-order walker shared by
+  `pruneEmptyDirs` and `repair --dry-run`. Deletion order is now provably
+  safe.
+- `fetchAssetBytes` refactored onto the shared `retryTransient` helper; one
+  retry policy now governs both manifest pagination and asset downloads
+  (including `Retry-After` parsing).
+- `MAX_GLOB_LEN` exported from `util/security.ts`, imported by `config.ts`.
+- `emitTypedIndex` + `ensureAgentsDoc` use atomic writes (`.tmp` →
+  `rename`) so a crash mid-write can never leave a truncated `index.ts` /
+  `AGENTS.md` that fails bundler resolves.
+- New `util/format.ts` — `formatBytes` shared by `sync` and `list`; was
+  previously a private helper inside `sync.ts`.
+- `start.ts` no longer dynamically imports `node:fs/promises` mid-function.
+- `loadState` corrupt-state quarantine — renames a malformed `state.json`
+  to `.corrupt-<ts>` and falls back to a full sync.
+- `_shared/errorHandler.ts` (edge) mints a fallback `X-Request-Id` when the
+  caller didn’t pass one through.
+
+### Tests
+- Test suite expanded from 6 to **78** passing. New coverage: manifest
+  shape guard, cursor-loop detection, retry semantics (5xx triple-retry,
+  429 Retry-After, network-error wrap, non-retryable 4xx bubble),
+  `assertSafeOutDir` (relative / absolute / `..` / null byte),
+  `assertSafeAssetSegments`, `validateEndpointUrl` (HTTPS-only, insecure
+  escape hatch, no embedded credentials, redirect refusal),
+  `assertPathInsideRoot`, `safeFetch` cross-origin redirect,
+  `walkOutDirPngs` (dotfile / symlink / cross-root), `listEmptyDirs`,
+  `maxIsoTimestamp` strictness, `doctor --json` discriminated `network`
+  shape, watcher idle backoff math at multiple intervals (regression
+  guard for the ticks-vs-seconds fix), `friendlyFsError` rewrites for
+  `EACCES`/`EROFS`/`EBUSY`, corrupt-state quarantine.
+
 ## [0.3.3] — 2026-06-01
 
 ### Added

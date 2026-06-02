@@ -1,10 +1,11 @@
 import kleur from 'kleur';
 import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { resolve } from 'node:path';
 
-import { configPath } from '../config.js';
+import { configPath, loadConfig } from '../config.js';
 import { hasPackageJson } from '../util/framework.js';
 import { findKeyInDotenv, readCredentialsSync, writeCredentials } from '../util/credentials.js';
 import { initCommand } from './init.js';
@@ -37,10 +38,21 @@ export async function startCommand(opts: StartOpts = {}): Promise<void> {
     return;
   }
 
-  // 2. Run init non-interactively unless config already exists.
+  // 2. Run init non-interactively unless config already exists AND is valid.
+  // A broken `magicpixel.json` (hand-edited / truncated) used to slip past
+  // the existsSync check here and then explode deep inside `syncCommand`.
   const cfgPath = configPath();
   if (existsSync(cfgPath) && !opts.force) {
-    console.log(kleur.dim(`  Found existing magicpixel.json — skipping init.`));
+    try {
+      await loadConfig();
+      console.log(kleur.dim(`  Found existing magicpixel.json — skipping init.`));
+    } catch (e) {
+      const msg = (e as Error).message ?? String(e);
+      console.log(kleur.yellow(`  Existing magicpixel.json is invalid:`));
+      for (const line of msg.split('\n')) console.log(kleur.yellow(`    ${line}`));
+      console.log(kleur.dim('  Re-run `npx magicpixel start --force` to overwrite it, or fix the file by hand.'));
+      return;
+    }
   } else {
     await initCommand({ yes: true, force: opts.force });
   }
@@ -61,34 +73,62 @@ export async function startCommand(opts: StartOpts = {}): Promise<void> {
     console.log(kleur.dim('  Using stored credentials from .magicpixel/credentials.'));
   }
 
-  // 5. First sync.
+  // 5. First sync. syncCommand sets `process.exitCode = 1` on download
+  //    failures without throwing — snapshot around the call so we don't
+  //    print a misleading green "you're set up" over a half-failed run.
   console.log();
   console.log(kleur.bold('Step: first sync'));
+  const exitBefore = process.exitCode ?? 0;
   await syncCommand({ full: true });
+  const firstSyncFailed = (process.exitCode ?? 0) > exitBefore;
 
-  // 6. Tell the user how to run the watch loop.
+  // 6. Tell the user how to run the watch loop. If `init` couldn't patch
+  //    package.json (non-standard layout, write-protected, etc.) the
+  //    `magicpixel:watch` npm script won't exist — fall back to the
+  //    `npx` form so we never instruct users to run a script they don't have.
   console.log();
-  console.log(kleur.bold('You\'re set up. ✨'));
+  if (firstSyncFailed) {
+    console.log(kleur.yellow('! first sync completed with errors.'));
+    console.log(kleur.dim('  Re-run `npx magicpixel sync` to retry the failed downloads, or `npx magicpixel doctor` to diagnose.'));
+  } else {
+    console.log(kleur.bold('You\'re set up. ✨'));
+  }
   console.log();
-  console.log(`  ${kleur.green('▶')} ${kleur.bold('npm run magicpixel:watch')}   ${kleur.dim('# keeps sprites fresh while you edit them in MagicPixel')}`);
+  const hasWatch = await hasWatchScript();
+  if (hasWatch) {
+    console.log(`  ${kleur.green('▶')} ${kleur.bold('npm run magicpixel:watch')}   ${kleur.dim('# keeps sprites fresh while you edit them in MagicPixel')}`);
+  } else {
+    console.log(`  ${kleur.green('▶')} ${kleur.bold('npx magicpixel sync --watch')}   ${kleur.dim('# keeps sprites fresh while you edit them in MagicPixel')}`);
+  }
   console.log();
   if (await hasDevScript()) {
+    const watchCmd = hasWatch ? 'npm run magicpixel:watch' : 'npx magicpixel sync --watch';
     console.log(kleur.dim('  Tip: run your dev server and the watcher together with'));
-    console.log(kleur.dim('       `npx concurrently "npm run dev" "npm run magicpixel:watch"`'));
+    console.log(kleur.dim(`       \`npx concurrently "npm run dev" "${watchCmd}"\``));
     console.log();
   }
 }
 
-async function hasDevScript(): Promise<boolean> {
+async function readPkgJson(): Promise<Record<string, unknown> | null> {
   try {
     const path = resolve(process.cwd(), 'package.json');
-    if (!existsSync(path)) return false;
-    const { readFile } = await import('node:fs/promises');
-    const pkg = JSON.parse(await readFile(path, 'utf8'));
-    return typeof pkg.scripts?.dev === 'string';
+    if (!existsSync(path)) return null;
+    return JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
   } catch {
-    return false;
+    return null;
   }
+}
+
+async function hasWatchScript(): Promise<boolean> {
+  const pkg = await readPkgJson();
+  const scripts = pkg?.scripts;
+  return !!scripts && typeof scripts === 'object' && typeof (scripts as Record<string, unknown>)['magicpixel:watch'] === 'string';
+}
+
+async function hasDevScript(): Promise<boolean> {
+  const pkg = await readPkgJson();
+  const scripts = pkg?.scripts;
+  return !!scripts && typeof scripts === 'object' && typeof (scripts as Record<string, unknown>).dev === 'string';
 }
 
 async function maybeMigrateDotenvKey(): Promise<void> {

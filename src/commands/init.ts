@@ -1,12 +1,14 @@
 import kleur from 'kleur';
 import { existsSync } from 'node:fs';
-import { readFile, writeFile, appendFile } from 'node:fs/promises';
+import { readFile, appendFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 
 import { configPath, defaultConfig, saveConfig, type MagicPixelConfig } from '../config.js';
-import { detectFramework, suggestOutDir, hasPackageJson } from '../util/framework.js';
+import { detectFramework, suggestOutDir, hasPackageJson, isStaticOutDir } from '../util/framework.js';
+import { assertSafeOutDir } from '../util/security.js';
+import { atomicWrite } from '../util/atomicWrite.js';
 
 const WATCH_SCRIPT_NAME = 'magicpixel:watch';
 const WATCH_SCRIPT_CMD = 'magicpixel sync --watch';
@@ -42,13 +44,26 @@ export async function initCommand(opts: InitOpts): Promise<void> {
       if (framework) console.log(kleur.dim(`  Detected: ${framework}`));
       console.log();
 
-      config.outDir = (await rl.question(
-        `${kleur.cyan('?')} Where should assets be written? ${kleur.dim(`(${suggestedOutDir})`)} `,
-      )).trim() || suggestedOutDir;
+      // Re-prompt loop: catch unsafe outDir values (null bytes, `..` segments)
+      // at input time rather than letting `loadConfig` reject them on the next
+      // `sync`/`status` run. UX is faster and the error sits next to the cause.
+      // Delegates to `assertSafeOutDir` so the predicate matches `loadConfig` exactly.
+      for (;;) {
+        const ans = (await rl.question(
+          `${kleur.cyan('?')} Where should assets be written? ${kleur.dim(`(${suggestedOutDir})`)} `,
+        )).trim();
+        const candidate = ans || suggestedOutDir;
+        try {
+          config.outDir = assertSafeOutDir(candidate);
+          break;
+        } catch (e) {
+          console.log(kleur.yellow(`  ${(e as Error).message} Try again.`));
+        }
+      }
 
       // Typed index only makes sense when the outDir is importable by a bundler.
       // public/ and static/ are served as-is and cannot be imported.
-      if (isImportableOutDir(config.outDir)) {
+      if (!isStaticOutDir(config.outDir)) {
         const emitAns = (await rl.question(
           `${kleur.cyan('?')} Emit a typed index.ts for autocomplete? ${kleur.dim('(Y/n)')} `,
         )).trim().toLowerCase();
@@ -73,7 +88,7 @@ export async function initCommand(opts: InitOpts): Promise<void> {
       rl.close();
     }
   } else {
-    config.emitIndex = isImportableOutDir(config.outDir);
+    config.emitIndex = !isStaticOutDir(config.outDir);
   }
 
   await saveConfig(config);
@@ -136,22 +151,16 @@ async function ensureWatchScript(pkgPath: string): Promise<WatchScriptResult> {
     scripts[WATCH_SCRIPT_NAME] = WATCH_SCRIPT_CMD;
     pkg.scripts = scripts;
     const trailingNewline = raw.endsWith('\n') ? '\n' : '';
-    await writeFile(pkgPath, JSON.stringify(pkg, null, 2) + trailingNewline, 'utf8');
+    // Atomic write — a crash mid-write must never corrupt the user's package.json.
+    await atomicWrite(pkgPath, JSON.stringify(pkg, null, 2) + trailingNewline);
     return { added: true, alreadyPresent: false };
   } catch (e) {
     return { added: false, alreadyPresent: false, error: (e as Error).message };
   }
 }
 
-/**
- * `public/` and `static/` are served as-is by frameworks and can't be
- * `import`ed by a bundler — emitting a typed index there is dead code that
- * also gets shipped as a static asset.
- */
-function isImportableOutDir(outDir: string): boolean {
-  const norm = outDir.replace(/\\/g, '/').replace(/^\.\//, '');
-  return !/^(public|static)(\/|$)/.test(norm);
-}
+// `isImportableOutDir` lives in util/framework.ts as `isStaticOutDir`
+// (negated) — shared with `emitIndex.ts`'s AGENTS.md snippet resolver.
 
 async function ensureGitignore(): Promise<boolean> {
   const path = resolve(process.cwd(), '.gitignore');

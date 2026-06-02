@@ -1,8 +1,10 @@
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, mkdir, rename } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { validateEndpointUrl } from './util/security.js';
+import { assertSafeOutDir, MAX_GLOB_LEN, validateEndpointUrl } from './util/security.js';
 import { readCredentialsSync } from './util/credentials.js';
+import { friendlyFsError } from './util/errors.js';
+import { atomicWrite } from './util/atomicWrite.js';
 
 const CONFIG_FILENAME = 'magicpixel.json';
 const STATE_DIR = '.magicpixel';
@@ -62,12 +64,21 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<MagicPixe
         `  Fix: open the file and check for trailing commas or quotes.`,
     );
   }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(
+      `${CONFIG_FILENAME} must be a JSON object (got ${Array.isArray(parsed) ? 'array' : typeof parsed}).\n` +
+        `  Fix: replace the file contents with { "outDir": "src/assets/magicpixel", "include": ["**/*"] }.`,
+    );
+  }
   const include = normalizeGlobList(parsed.include ?? defaultConfig.include, 'include');
   const exclude = normalizeGlobList(parsed.exclude ?? defaultConfig.exclude, 'exclude');
-  const outDir = typeof parsed.outDir === 'string' && parsed.outDir.trim() ? parsed.outDir.trim() : defaultConfig.outDir;
-  if (outDir.includes('\0') || outDir.split(/[/\\]/).some((seg) => seg === '..')) {
+  const rawOutDir = typeof parsed.outDir === 'string' && parsed.outDir.trim() ? parsed.outDir : defaultConfig.outDir;
+  let outDir: string;
+  try {
+    outDir = assertSafeOutDir(rawOutDir);
+  } catch (e) {
     throw new Error(
-      `${CONFIG_FILENAME}: outDir must not contain ".." segments.\n` +
+      `${CONFIG_FILENAME}: ${(e as Error).message}\n` +
         `  Fix: use a path like src/assets/magicpixel.`,
     );
   }
@@ -79,33 +90,55 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<MagicPixe
     endpoint = validateEndpointUrl(parsed.endpoint.trim());
   }
 
+  let emitIndex: boolean = defaultConfig.emitIndex ?? true;
+  if (parsed.emitIndex !== undefined) {
+    if (typeof parsed.emitIndex !== 'boolean') {
+      throw new Error(
+        `${CONFIG_FILENAME}: "emitIndex" must be a boolean (got ${typeof parsed.emitIndex}).\n` +
+          `  Fix: set "emitIndex": true or "emitIndex": false (or remove the field).`,
+      );
+    }
+    emitIndex = parsed.emitIndex;
+  }
+
   return {
     outDir,
     include,
     exclude,
     endpoint,
-    emitIndex: parsed.emitIndex ?? defaultConfig.emitIndex,
+    emitIndex,
   };
 }
 
 const MAX_GLOBS = 64;
-const MAX_GLOB_LEN = 256;
 
 function normalizeGlobList(value: unknown, field: string): string[] {
   if (!Array.isArray(value)) {
-    throw new Error(`${CONFIG_FILENAME}: "${field}" must be an array of glob strings.`);
+    throw new Error(
+      `${CONFIG_FILENAME}: "${field}" must be an array of glob strings (got ${typeof value}).\n` +
+        `  Fix: change "${field}" to an array, e.g. "${field}": ["**/*"].`,
+    );
   }
   if (value.length > MAX_GLOBS) {
-    throw new Error(`${CONFIG_FILENAME}: "${field}" has too many entries (max ${MAX_GLOBS}).`);
+    throw new Error(
+      `${CONFIG_FILENAME}: "${field}" has too many entries (${value.length}, max ${MAX_GLOBS}).\n` +
+        `  Fix: combine patterns or split your sync into multiple projects.`,
+    );
   }
   const out: string[] = [];
   for (const item of value) {
     if (typeof item !== 'string' || !item.trim()) {
-      throw new Error(`${CONFIG_FILENAME}: "${field}" entries must be non-empty strings.`);
+      throw new Error(
+        `${CONFIG_FILENAME}: "${field}" entries must be non-empty strings.\n` +
+          `  Fix: remove empty/null entries from "${field}".`,
+      );
     }
     const g = item.trim();
     if (g.length > MAX_GLOB_LEN || g.includes('\0')) {
-      throw new Error(`${CONFIG_FILENAME}: "${field}" entry is too long or invalid.`);
+      throw new Error(
+        `${CONFIG_FILENAME}: "${field}" entry is too long (>${MAX_GLOB_LEN} chars) or contains a null byte.\n` +
+          `  Fix: shorten the pattern.`,
+      );
     }
     out.push(g);
   }
@@ -116,15 +149,50 @@ export async function saveConfig(
   config: MagicPixelConfig,
   cwd: string = process.cwd(),
 ): Promise<void> {
-  await writeFile(configPath(cwd), JSON.stringify(config, null, 2) + '\n', 'utf8');
+  const path = configPath(cwd);
+  try {
+    // Atomic write: a crash mid-write must never leave magicpixel.json
+    // truncated — a corrupt config wedges every subsequent `sync`/`status`
+    // run with a JSON parse error and is exactly the scenario `repair` was
+    // built to recover from. Cheap to avoid in the first place.
+    await atomicWrite(path, JSON.stringify(config, null, 2) + '\n');
+  } catch (e) {
+    throw friendlyFsError(e, {
+      operation: 'Saving magicpixel.json',
+      path,
+      hint: 'magicpixel.json holds your sync config — without it `magicpixel sync` can\'t run.',
+    });
+  }
 }
 
 export async function loadState(cwd: string = process.cwd()): Promise<SyncState> {
   const path = statePath(cwd);
   if (!existsSync(path)) return {};
+  let raw: string;
   try {
-    return JSON.parse(await readFile(path, 'utf8')) as SyncState;
+    raw = await readFile(path, 'utf8');
   } catch {
+    return {};
+  }
+  try {
+    return JSON.parse(raw) as SyncState;
+  } catch (e) {
+    // Corrupt state file (truncated by a crash, hand-edited, disk full, etc.)
+    // Quarantine it so the user can recover/inspect, then fall back to a full
+    // re-sync rather than wedging every future run with a parse error.
+    const quarantine = `${path}.corrupt-${Date.now()}`;
+    try {
+      await rename(path, quarantine);
+      console.warn(
+        `[magicpixel] state.json was corrupt (${(e as Error).message}). ` +
+          `Moved to ${quarantine} and falling back to a full sync.`,
+      );
+    } catch {
+      console.warn(
+        `[magicpixel] state.json was corrupt (${(e as Error).message}); ` +
+          `falling back to a full sync.`,
+      );
+    }
     return {};
   }
 }
@@ -134,8 +202,20 @@ export async function saveState(
   cwd: string = process.cwd(),
 ): Promise<void> {
   const path = statePath(cwd);
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(state, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
+  try {
+    await mkdir(dirname(path), { recursive: true });
+    // Atomic write: stage to a sibling tmp file then rename. Prevents a half-
+    // written state.json on crash/power-loss, which would then poison the next
+    // run (and require the corrupt-state recovery path above). Mode 0600
+    // because state.json sits next to the API-key-bearing credentials file.
+    await atomicWrite(path, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 });
+  } catch (e) {
+    throw friendlyFsError(e, {
+      operation: 'Saving sync state',
+      path,
+      hint: 'state.json tracks what was last synced — without it the next run re-downloads everything.',
+    });
+  }
 }
 
 export function resolveEndpoint(config: MagicPixelConfig): string {
@@ -152,13 +232,9 @@ export function resolveEndpoint(config: MagicPixelConfig): string {
 export function getApiKey(): string {
   const fromEnv = process.env.MAGICPIXEL_API_KEY;
   let key: string | undefined = fromEnv;
-  let source: 'env' | 'credentials-file' = 'env';
   if (!key) {
     const stored = readCredentialsSync();
-    if (stored) {
-      key = stored.apiKey;
-      source = 'credentials-file';
-    }
+    if (stored) key = stored.apiKey;
   }
   if (!key) {
     throw new Error(
@@ -169,8 +245,11 @@ export function getApiKey(): string {
         '    3. Re-run the command.',
     );
   }
+  // Env vars from shells routinely smuggle in stray quotes / whitespace; the
+  // credentials file is already trimmed at write time but we trim defensively
+  // here so both code paths share the same validation.
   const trimmed = key.trim();
-  if (trimmed !== key && source === 'env') {
+  if (trimmed !== key && fromEnv !== undefined) {
     throw new Error(
       `MAGICPIXEL_API_KEY has leading/trailing whitespace.\n` +
         `  Fix: export the key without spaces or quotes.`,

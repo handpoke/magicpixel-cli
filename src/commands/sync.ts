@@ -1,17 +1,20 @@
 import kleur from 'kleur';
 import ora, { type Ora } from 'ora';
 import { createHash } from 'node:crypto';
-import { mkdir, writeFile, unlink, readdir, rm, rename } from 'node:fs/promises';
+import { mkdir, writeFile, unlink, rename } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
 
 import { loadConfig, loadState, saveState, type SyncState } from '../config.js';
 import { fetchAllManifest, fetchAssetBytes, ApiError, type ManifestEntry } from '../api.js';
 import { fileSha256 } from '../util/hash.js';
-import { assetDiskPath, assetDiskPathFromKey } from '../util/paths.js';
+import { assetDiskPath, assetDiskPathFromKey, pruneEmptyDirs, walkOutDirPngs } from '../util/paths.js';
 import { createLimit } from '../util/limit.js';
 import { emitTypedIndex, ensureAgentsDoc, scanDiskAssets } from '../util/emitIndex.js';
 import { assertPathInsideRoot, tmpPathFor } from '../util/security.js';
+import { friendlyFsError } from '../util/errors.js';
+import { maxIsoTimestamp } from '../util/iso.js';
+import { formatBytes } from '../util/format.js';
 
 interface SyncOpts {
   prune?: boolean;  // commander: defaults true; --no-prune sets false
@@ -52,9 +55,9 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
   // sprites in MagicPixel and watching them refresh in their game's dev
   // server. Incremental polls send `?since=<lastSync>` so an empty manifest
   // round-trip is cheap (a single HTTP HEAD-sized response with `count: 0`).
-  // Floor stays at 2s to keep accidental thrashing in check; users who need
-  // less can pass `--watch 5`.
-  const intervalSec = typeof opts.watch === 'string' ? Math.max(2, parseInt(opts.watch, 10) || 2) : 2;
+  // Commander already validated the numeric value (2–3600); the `?? 2`
+  // covers the bare boolean `-w` form.
+  const intervalSec = typeof opts.watch === 'string' ? parseInt(opts.watch, 10) : 2;
 
   // Header — print once on start. Project/asset count is best-effort; if the
   // first manifest fetch fails we still want the loop to come up and retry.
@@ -68,43 +71,84 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
   console.log(kleur.bold('👀 MagicPixel watching for changes…'));
   console.log(`   Edit at:  ${kleur.cyan('https://magicpixel.art')}`);
   if (headerCount !== null) console.log(kleur.dim(`   Sprites:  ${headerCount}`));
-  console.log(kleur.dim(`   Polling:  every ${intervalSec}s   ·   Stop: Ctrl+C`));
+  console.log(kleur.dim(`   Polling:  every ${intervalSec}s (slows when idle)   ·   Stop: Ctrl+C`));
   console.log();
 
   let stopping = false;
   let inFlight = false;
-  let resolveIdle: (() => void) | null = null;
   let backoffSec = intervalSec;
   let pausedForAuth = false;
+  // Mirrors pausedForAuth for the network-offline path: once we've told the
+  // user "MagicPixel is offline", the next successful tick prints a single
+  // "back online" recovery line. Without this flag a user who walked away
+  // during an outage has no signal that things are healthy again.
+  let pausedForNetwork = false;
+  // After this many consecutive 401/403s we give up and exit non-zero so a
+  // parent process (Vite plugin, systemd, pm2) can tell the watcher is
+  // genuinely broken (revoked key) rather than transiently blipped.
+  const MAX_AUTH_FAILURES = 5;
+  let consecutiveAuthFailures = 0;
   // Adaptive idle backoff: after a few minutes of nothing-to-do we slow the
-  // poll from 2s → 5s → 10s so a dev who walked away isn't hammering the
-  // manifest endpoint. ANY change OR error resets this back to intervalSec,
+  // poll from intervalSec → 5s → 10s so a dev who walked away isn't hammering
+  // the manifest endpoint. ANY change OR error resets this back to intervalSec,
   // so the "edit → see it" promise stays intact the moment the user comes
   // back. Error backoff (2→60s) is separate and continues to win.
   let consecutiveIdleTicks = 0;
+  // Thresholds in seconds (NOT ticks) so a `--watch 10` user gets the same
+  // ~3 min / ~15 min UX as a default `--watch 2` user. Previously these were
+  // tick counts (90 / 300) which made the slowdown timing scale with intervalSec.
+  const IDLE_SOFT_BACKOFF_SECONDS = 180;
+  const IDLE_HARD_BACKOFF_SECONDS = 900;
 
-  const onSigint = () => {
+  // Cancellable idle sleep — `onStopSignal` calls `wakeStop()` so the next
+  // tick exits immediately instead of waiting out the full backoff (which can
+  // be 60s at the error ceiling). Initialised to a no-op so the first
+  // pre-loop `await tick()` is safe even before the first sleep.
+  let wakeStop: () => void = () => {};
+
+  // Handle both SIGINT (Ctrl+C) and SIGTERM (`kill`, `docker stop`, systemd,
+  // pm2). Without the SIGTERM listener a supervisor-managed watcher would die
+  // mid-sync without draining in-flight work or preserving the exit code.
+  const onStopSignal = (signal: NodeJS.Signals) => {
     if (stopping) return;
     stopping = true;
+    wakeStop();
     process.stdout.write('\x1b[2K\r');
     if (inFlight) {
-      console.log(kleur.dim('[watch] finishing current sync… (Ctrl+C again to force quit)'));
-      process.once('SIGINT', () => process.exit(130));
+      console.log(kleur.dim(`[watch] finishing current sync… (${signal} again to force quit)`));
+      process.once(signal, () => process.exit(signal === 'SIGINT' ? 130 : 143));
     } else {
-      console.log(kleur.dim('[watch] stopped.'));
-      process.exit(0);
+      if (!opts.quiet) console.log(kleur.dim('[watch] stopped.'));
+      // Preserve any exit code already set by a prior failed tick.
+      process.exit(process.exitCode ?? 0);
     }
   };
-  process.on('SIGINT', onSigint);
+  process.on('SIGINT', onStopSignal);
+  process.on('SIGTERM', onStopSignal);
 
   const tick = async () => {
     if (inFlight || stopping) return;
     inFlight = true;
     try {
       const r = await runOnce({ ...opts, watch: false }, { watchMode: true });
-      // Reset backoff + auth-pause flags on any successful tick.
+      // Reset backoff on any successful tick. Resume message fires once when
+      // we recover from an auth pause — `getApiKey()` re-reads
+      // .magicpixel/credentials on every call, so a `magicpixel login` in
+      // another terminal is picked up automatically by the next tick.
+      const wasPausedForAuth = pausedForAuth;
+      const wasPausedForNetwork = pausedForNetwork;
       backoffSec = intervalSec;
       pausedForAuth = false;
+      pausedForNetwork = false;
+      consecutiveAuthFailures = 0;
+      if (wasPausedForAuth && !opts.quiet) {
+        process.stdout.write('\x1b[2K\r');
+        console.log(`${kleur.dim(timestamp())} ${kleur.green('✓')} Key accepted again — resuming.`);
+      }
+      if (wasPausedForNetwork && !wasPausedForAuth && !opts.quiet) {
+        process.stdout.write('\x1b[2K\r');
+        console.log(`${kleur.dim(timestamp())} ${kleur.green('✓')} Back online — resuming.`);
+      }
       const changedCount = r.added.length + r.modified.length + r.removed.length + r.renamed.length;
       if (changedCount > 0) {
         // Snap back to the fast interval the moment anything changes.
@@ -112,9 +156,10 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
         backoffSec = intervalSec;
       } else {
         consecutiveIdleTicks++;
-        // Thresholds in *ticks*; at intervalSec=2 these are ~3 min and ~15 min.
-        if (consecutiveIdleTicks >= 300) backoffSec = Math.max(intervalSec, 10);
-        else if (consecutiveIdleTicks >= 90) backoffSec = Math.max(intervalSec, 5);
+        backoffSec = nextBackoffForIdle(consecutiveIdleTicks, intervalSec, {
+          softSec: IDLE_SOFT_BACKOFF_SECONDS,
+          hardSec: IDLE_HARD_BACKOFF_SECONDS,
+        });
       }
       if (opts.quiet) return;
       if (changedCount > 0) {
@@ -136,55 +181,159 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
       // Any error breaks the idle streak so we come back fast once it clears.
       consecutiveIdleTicks = 0;
 
-      if (apiErr && (apiErr.status === 401 || apiErr.status === 403)) {
+      const decision = classifyTickError(err, {
+        backoffSec,
+        pausedForAuth,
+        pausedForNetwork,
+        consecutiveAuthFailures,
+        maxAuthFailures: MAX_AUTH_FAILURES,
+      });
+
+      if (decision.kind === 'auth') {
         if (!pausedForAuth) {
-          console.log(`${kleur.dim(timestamp())} ${kleur.red('✗')} Your key looks invalid or rotated.`);
+          // Surface the request id (from B1) so the user can paste it into a
+          // support thread and we can correlate against edge function logs.
+          const idSuffix = apiErr?.requestId ? kleur.dim(` (request id: ${apiErr.requestId})`) : '';
+          console.log(`${kleur.dim(timestamp())} ${kleur.red('✗')} Your key looks invalid or rotated.${idSuffix}`);
           console.log(kleur.dim('   Fix: run `magicpixel login` (this watcher will keep retrying every 30s).'));
         }
         pausedForAuth = true;
-        backoffSec = 30;
-      } else if (isNetworkError(err)) {
-        if (backoffSec < 30) {
+        consecutiveAuthFailures = decision.consecutiveAuthFailures;
+        backoffSec = decision.nextBackoffSec;
+        if (decision.giveUp) {
+          console.log(
+            `${kleur.dim(timestamp())} ${kleur.red('✗')} Giving up after ${MAX_AUTH_FAILURES} consecutive auth failures.`,
+          );
+          console.log(kleur.dim('   Fix: run `magicpixel login` with a fresh key, then restart the watcher.'));
+          // Surface this to /admin/errors — persistent watcher auth failure
+          // means a key is mass-rejected (revoked, project deleted, edge
+          // misconfig) and we want visibility without waiting for a support
+          // ping. Awaited so the report flushes before exit.
+          const { reportAndExit } = await import('../util/telemetry.js');
+          await reportAndExit(err, 'sync (watch)', 2);
+        }
+      } else if (decision.kind === 'network') {
+        consecutiveAuthFailures = 0;
+        if (decision.printMessage) {
+          const idSuffix = apiErr?.requestId ? kleur.dim(` (request id: ${apiErr.requestId})`) : '';
           console.log(
             `${kleur.dim(timestamp())} ${kleur.yellow('!')} MagicPixel is offline or your internet is. ` +
-              `Sprites you already have still work. Retrying in ${Math.min(backoffSec * 2, 60)}s.`,
+              `Sprites you already have still work. Retrying in ${decision.nextBackoffSec}s.${idSuffix}`,
           );
         }
-        backoffSec = Math.min(backoffSec * 2, 60);
+        pausedForNetwork = true;
+        backoffSec = decision.nextBackoffSec;
       } else {
-        console.log(`${kleur.dim(timestamp())} ${kleur.red('!')} ${firstLine}`);
-        backoffSec = Math.min(backoffSec * 2, 60);
+        consecutiveAuthFailures = 0;
+        const idSuffix = apiErr?.requestId ? kleur.dim(` (request id: ${apiErr.requestId})`) : '';
+        console.log(`${kleur.dim(timestamp())} ${kleur.red('!')} ${firstLine}${idSuffix}`);
+        backoffSec = decision.nextBackoffSec;
       }
     } finally {
       inFlight = false;
-      resolveIdle?.();
-      resolveIdle = null;
     }
   };
   await tick();
   while (!stopping) {
-    await new Promise((r) => setTimeout(r, backoffSec * 1000));
+    // Race the sleep against a stop signal so Ctrl+C during a long error-
+    // backoff (up to 60s) exits within a tick instead of after the full wait.
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        wakeStop = () => {};
+        resolve();
+      }, backoffSec * 1000);
+      wakeStop = () => {
+        clearTimeout(timer);
+        wakeStop = () => {};
+        resolve();
+      };
+    });
     if (stopping) break;
+    // `await tick()` only returns once its `finally` runs (clearing
+    // `inFlight`), so the loop naturally drains the in-flight sync on Ctrl+C
+    // before we exit — no separate idle-promise dance required.
     await tick();
   }
-  if (inFlight) {
-    await new Promise<void>((r) => {
-      resolveIdle = r;
-    });
-  }
-  console.log(kleur.dim('[watch] stopped.'));
-  process.exit(0);
+  if (!opts.quiet) console.log(kleur.dim('[watch] stopped.'));
+  // Preserve any non-zero exit code set by a failed tick — don't mask a
+  // download failure with a clean exit just because the user pressed Ctrl+C.
+  process.exit(process.exitCode ?? 0);
 }
 
 function isNetworkError(err: Error): boolean {
   // The api layer wraps fetch failures as `manifest: network error (...)`;
   // bare ENOTFOUND/ETIMEDOUT/etc. also surface here from `fetchAssetBytes`.
+  // Include 502/504 strings — corporate proxies often surface upstream gateway
+  // failures as terse text rather than as ApiError (e.g. 502 from a TLS
+  // terminator before our edge function ever sees the request).
   const msg = err.message;
   return (
     /network error/i.test(msg) ||
-    /ENOTFOUND|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN/i.test(msg) ||
-    /fetch failed/i.test(msg)
+    /ENOTFOUND|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH/i.test(msg) ||
+    /fetch failed/i.test(msg) ||
+    /\b(502|504)\b.*\b(bad gateway|gateway timeout)\b/i.test(msg)
   );
+}
+
+/**
+ * Pure helper: given how many consecutive idle ticks we've seen and the
+ * configured poll interval, return the next backoff in seconds. Exported so
+ * the watch-mode regression test can guard the "ticks vs seconds" bug fixed
+ * in 0.4.0 without exercising the full watch loop.
+ */
+export function nextBackoffForIdle(
+  consecutiveIdleTicks: number,
+  intervalSec: number,
+  thresholds: { softSec: number; hardSec: number } = { softSec: 180, hardSec: 900 },
+): number {
+  const idleSeconds = consecutiveIdleTicks * intervalSec;
+  if (idleSeconds >= thresholds.hardSec) return Math.max(intervalSec, 10);
+  if (idleSeconds >= thresholds.softSec) return Math.max(intervalSec, 5);
+  return intervalSec;
+}
+
+export interface TickErrorState {
+  backoffSec: number;
+  pausedForAuth: boolean;
+  pausedForNetwork: boolean;
+  consecutiveAuthFailures: number;
+  maxAuthFailures: number;
+}
+
+export type TickErrorDecision =
+  | { kind: 'auth'; nextBackoffSec: number; consecutiveAuthFailures: number; giveUp: boolean }
+  | { kind: 'network'; nextBackoffSec: number; printMessage: boolean }
+  | { kind: 'other'; nextBackoffSec: number };
+
+/**
+ * Pure helper: classify a per-tick error and compute the next backoff +
+ * counter updates. Extracted so the auth-failure watchdog and the
+ * network-recovery message can be unit-tested without spinning up signals or
+ * mocking timers.
+ *
+ * Caller is responsible for performing side effects (logging, `process.exit`,
+ * assigning the returned values back onto loop state).
+ */
+export function classifyTickError(err: Error, state: TickErrorState): TickErrorDecision {
+  const apiErr = err instanceof ApiError ? err : null;
+  if (apiErr && (apiErr.status === 401 || apiErr.status === 403)) {
+    const next = state.consecutiveAuthFailures + 1;
+    return {
+      kind: 'auth',
+      nextBackoffSec: 30,
+      consecutiveAuthFailures: next,
+      giveUp: next >= state.maxAuthFailures,
+    };
+  }
+  if (isNetworkError(err)) {
+    const nextBackoffSec = Math.min(state.backoffSec * 2, 60);
+    // Print on the first offline tick, then again whenever backoff changes —
+    // capped at 60s so users who walked away still see periodic confirmation
+    // the watcher is alive and retrying.
+    const printMessage = !state.pausedForNetwork || nextBackoffSec !== state.backoffSec;
+    return { kind: 'network', nextBackoffSec, printMessage };
+  }
+  return { kind: 'other', nextBackoffSec: Math.min(state.backoffSec * 2, 60) };
 }
 
 interface RunOpts {
@@ -231,28 +380,48 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     }
   }
 
-  // Diff against disk
+  // Compute the disk path once per entry and reuse it across the diff /
+  // orphan / download loops — saves three resolves + two security asserts
+  // per asset on large projects. Every entry in `manifest` is pre-seeded, so
+  // the lookup never misses; non-null assertion is safe.
+  const diskPathById = new Map<string, string>();
+  for (const entry of manifest) {
+    diskPathById.set(entry.id, assetDiskPath(config.outDir, entry));
+  }
+  const pathFor = (entry: ManifestEntry): string => diskPathById.get(entry.id)!;
+
+  // Diff against disk. SHA pre-check runs through the same concurrency pool
+  // used for downloads — on a 1k-asset project that's all-unchanged this is
+  // the dominant wall-clock cost of an incremental sync. We cache each result
+  // so the download loop can reuse it for `If-None-Match` ETags instead of
+  // re-hashing the same file moments later.
+  const diffLimit = createLimit(concurrency);
+  const shaByEntryId = new Map<string, string | null>();
   const toDownload: ManifestEntry[] = [];
   let bytesSaved = 0;
   let unchanged = 0;
-  for (const entry of manifest) {
-    const diskPath = assetDiskPath(config.outDir, entry);
-    const localSha = await fileSha256(diskPath);
-    if (entry.sha256 && localSha && entry.sha256 === localSha) {
-      unchanged++;
-      if (entry.size_bytes) bytesSaved += entry.size_bytes;
-    } else {
-      toDownload.push(entry);
-    }
-  }
+  await Promise.all(
+    manifest.map((entry) =>
+      diffLimit(async () => {
+        const localSha = await fileSha256(pathFor(entry));
+        shaByEntryId.set(entry.id, localSha);
+        if (entry.sha256 && localSha && entry.sha256 === localSha) {
+          unchanged++;
+          if (entry.size_bytes) bytesSaved += entry.size_bytes;
+        } else {
+          toDownload.push(entry);
+        }
+      }),
+    ),
+  );
 
   // Orphan detection only when we have the full picture.
   // (Renames also produce a stale path on disk — collected separately below.)
   let orphans: string[] = [];
   if (!since) {
-    const remoteDiskPaths = new Set(manifest.map((e) => assetDiskPath(config.outDir, e)));
-    orphans = (await findLocalPngs(resolve(process.cwd(), config.outDir)))
-      .filter((p) => !remoteDiskPaths.has(p));
+    const remoteDiskPaths = new Set(manifest.map((e) => pathFor(e)));
+    const localPngs = await walkOutDirPngs(config.outDir);
+    orphans = localPngs.map((a) => a.abs).filter((p) => !remoteDiskPaths.has(p));
   }
   // Stale paths from detected renames (always pruned, even in incremental mode —
   // otherwise the old PNG silently lingers next to the renamed copy).
@@ -318,13 +487,24 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   await Promise.all(
     toDownload.map((entry) =>
       run(async () => {
-        const diskPath = assetDiskPath(config.outDir, entry);
+        const diskPath = pathFor(entry);
         const existedBefore = existsSync(diskPath);
         try {
-          const localSha = await fileSha256(diskPath);
+          // Reuse the SHA computed during the diff pre-check — re-hashing the
+          // same file moments later was a measurable cost on large projects.
+          const localSha = shaByEntryId.get(entry.id) ?? null;
           const bytes = await fetchAssetBytes(config, entry.key, localSha);
           if (bytes === null) {
+            // Server returned 304 (ETag matched). Credit the asset's manifest
+            // size to bytesSaved so the end-of-sync summary reflects the
+            // bandwidth the conditional GET avoided.
+            //
+            // Invariant: we only reach here for entries that made it into
+            // `toDownload`, i.e. the disk-SHA pre-check above did NOT credit
+            // them (typically because `entry.sha256` was null in the manifest
+            // but the ETag still matched server-side). So no double-counting.
             result.unchanged++;
+            if (entry.size_bytes) result.bytesSaved += entry.size_bytes;
           } else {
             if (entry.sha256) {
               const actual = createHash('sha256').update(bytes).digest('hex');
@@ -334,11 +514,21 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
                 );
               }
             }
-            await mkdir(dirname(diskPath), { recursive: true });
-            const tmp = tmpPathFor(diskPath);
-            assertPathInsideRoot(tmp, resolve(process.cwd(), config.outDir), 'outDir');
-            await writeFile(tmp, bytes);
-            await rename(tmp, diskPath);
+            // Wrap any of mkdir/writeFile/rename so the user sees a friendly
+            // multi-line diagnostic instead of a raw `EACCES: permission denied`.
+            try {
+              await mkdir(dirname(diskPath), { recursive: true });
+              const tmp = tmpPathFor(diskPath);
+              assertPathInsideRoot(tmp, resolve(process.cwd(), config.outDir), 'outDir');
+              await writeFile(tmp, bytes);
+              await rename(tmp, diskPath);
+            } catch (fsErr) {
+              throw friendlyFsError(fsErr, {
+                operation: `Writing asset`,
+                path: diskPath,
+                hint: `Sync can't continue until outDir (${config.outDir}) is writable.`,
+              });
+            }
             if (existedBefore) result.modified.push(entry.key);
             else result.added.push(entry.key);
             result.bytesIn += bytes.byteLength;
@@ -346,7 +536,15 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
         } catch (e) {
           result.failed++;
           progress?.stop();
-          console.log(`  ${kleur.red('!')} ${entry.key}: ${(e as Error).message.split('\n')[0]}`);
+          // Multi-line messages come from friendlyFsError — print all lines
+          // so the user sees the fix hint. Single-line errors stay terse.
+          const msg = (e as Error).message ?? String(e);
+          if (msg.includes('\n')) {
+            console.log(`  ${kleur.red('!')} ${entry.key}:`);
+            for (const line of msg.split('\n')) console.log(`     ${line}`);
+          } else {
+            console.log(`  ${kleur.red('!')} ${entry.key}: ${msg}`);
+          }
           progress?.start();
         } finally {
           done++;
@@ -397,7 +595,25 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   }
   const nextState: SyncState = { ...state, assets: nextAssets };
   if (result.failed === 0) {
-    nextState.lastSync = startedAt;
+    // Advance the cursor to the newest row we actually observed, NOT the
+    // wall-clock time the sync started. Using startedAt silently skipped
+    // rows whose `updated_at` lived in the gap between the manifest snapshot
+    // and the next poll (notably when only metadata changed — e.g. artboard
+    // renames — and the row updated between fetch start and save).
+    const maxUpdatedAt = maxIsoTimestamp(manifest.map((e) => e.updated_at));
+    if (maxUpdatedAt) {
+      // Take the later of: newest row we saw, or the prior cursor. Never
+      // rewind — an incremental sync that returned 0 rows must keep the
+      // existing lastSync (otherwise we'd re-download history next tick).
+      nextState.lastSync =
+        state.lastSync && state.lastSync > maxUpdatedAt ? state.lastSync : maxUpdatedAt;
+    } else if (state.lastSync) {
+      nextState.lastSync = state.lastSync;
+    } else {
+      // No prior cursor and an empty manifest (fresh project): fall back to
+      // startedAt so future incremental polls have a baseline.
+      nextState.lastSync = startedAt;
+    }
     delete nextState.lastError;
   } else {
     nextState.lastError = `${result.failed} download${result.failed === 1 ? '' : 's'} failed at ${startedAt}`;
@@ -416,17 +632,19 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     }
     const indexPath = await emitTypedIndex(config.outDir, diskEntries);
     if (verbose) console.log(kleur.dim(`  index → ${relative(process.cwd(), indexPath)}`));
+  }
 
-    // Nudge AI tools toward the typed index. Idempotent — `ensureAgentsDoc`
-    // no-ops once our marker section is present.
-    try {
-      const agentsResult = await ensureAgentsDoc(config.outDir);
-      if (verbose && agentsResult !== 'unchanged') {
-        console.log(kleur.dim(`  AGENTS.md ${agentsResult}`));
-      }
-    } catch {
-      // Never let an AGENTS.md write failure break sync.
+  // AGENTS.md hint is always written — `public/` and `static/` users
+  // (emitIndex: false) need the absolute-URL snippet just as much as
+  // bundler-importable outDir users need the ES-import one.
+  // `ensureAgentsDoc` no-ops once our marker section is present.
+  try {
+    const agentsResult = await ensureAgentsDoc(config.outDir);
+    if (verbose && agentsResult !== 'unchanged') {
+      console.log(kleur.dim(`  AGENTS.md ${agentsResult}`));
     }
+  } catch {
+    // Never let an AGENTS.md write failure break sync.
   }
 
   await saveState(nextState);
@@ -445,7 +663,10 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       (renamed.length ? `, renamed ${renamed.length}` : '') +
       (result.failed ? `, failed ${result.failed}` : '');
     console.log(result.failed ? kleur.yellow(`done with errors. ${summary}`) : kleur.green(`✓ done. ${summary}`));
-    printChanges(result, '  ');
+    // Per-file change list. Suppress renames here — printRenames below owns
+    // the rename block (it adds the import-update hints). Letting both fire
+    // would print each rename twice.
+    printChanges(result, '  ', { includeRenames: renamed.length === 0 });
     if (renamed.length > 0) printRenames(renamed, { withHints: true });
   }
   if (result.failed) process.exitCode = 1;
@@ -454,11 +675,13 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
 
 const CHANGE_PRINT_CAP = 50;
 
-function printChanges(r: SyncResult, indent: string): void {
+function printChanges(r: SyncResult, indent: string, opts: { includeRenames: boolean } = { includeRenames: true }): void {
   const lines: string[] = [];
   for (const k of r.added) lines.push(`${indent}${kleur.green('+')} ${k}`);
   for (const k of r.modified) lines.push(`${indent}${kleur.cyan('~')} ${k}`);
-  for (const r2 of r.renamed) lines.push(`${indent}${kleur.cyan('↪')} ${r2.oldKey} → ${r2.newKey}`);
+  if (opts.includeRenames) {
+    for (const r2 of r.renamed) lines.push(`${indent}${kleur.cyan('↪')} ${r2.oldKey} → ${r2.newKey}`);
+  }
   for (const k of r.removed) lines.push(`${indent}${kleur.red('-')} ${k}`);
   if (lines.length === 0) return;
   if (lines.length <= CHANGE_PRINT_CAP) {
@@ -491,12 +714,6 @@ function progressText(done: number, total: number, bytes: number): string {
   return `${bar}  ${done}/${total}  ${kleur.dim(formatBytes(bytes))}`;
 }
 
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 function timestamp(): string {
   const d = new Date();
   return `[${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}]`;
@@ -516,61 +733,8 @@ function printOrphans(orphans: string[]) {
   for (const p of orphans) {
     console.log(`  ${kleur.dim('?')} ${relative(process.cwd(), p)}`);
   }
-  console.log(kleur.dim('  Pruning is on by default. Re-run without --no-prune to delete them.'));
+  console.log(kleur.dim('  You passed --no-prune, so these were kept. Remove the flag to delete them.'));
 }
 
-async function findLocalPngs(dir: string): Promise<string[]> {
-  if (!existsSync(dir)) return [];
-  const root = resolve(dir);
-  const out: string[] = [];
-  async function walk(d: string) {
-    const entries = await readdir(d, { withFileTypes: true });
-    for (const ent of entries) {
-      if (ent.isSymbolicLink()) continue;
-      const full = resolve(d, ent.name);
-      try {
-        assertPathInsideRoot(full, root, 'outDir');
-      } catch {
-        continue;
-      }
-      if (ent.isDirectory()) {
-        if (ent.name.startsWith('.')) continue;
-        await walk(full);
-      } else if (ent.isFile() && ent.name.toLowerCase().endsWith('.png')) {
-        out.push(full);
-      }
-    }
-  }
-  await walk(root);
-  return out;
-}
-
-async function pruneEmptyDirs(root: string): Promise<void> {
-  if (!existsSync(root)) return;
-  async function walk(d: string): Promise<boolean> {
-    const entries = await readdir(d, { withFileTypes: true });
-    let isEmpty = true;
-    for (const ent of entries) {
-      const full = resolve(d, ent.name);
-      if (ent.isDirectory()) {
-        const childEmpty = await walk(full);
-        if (childEmpty) {
-          await rm(full, { recursive: true, force: true });
-        } else {
-          isEmpty = false;
-        }
-      } else {
-        isEmpty = false;
-      }
-    }
-    return isEmpty;
-  }
-  const entries = await readdir(root, { withFileTypes: true });
-  for (const ent of entries) {
-    if (ent.isDirectory()) {
-      const full = resolve(root, ent.name);
-      const empty = await walk(full);
-      if (empty) await rm(full, { recursive: true, force: true });
-    }
-  }
-}
+// Note: orphan scan delegates to `walkOutDirPngs` in util/paths.ts (shared
+// with the typed-index emitter). `maxIsoTimestamp` lives in util/iso.ts.

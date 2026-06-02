@@ -58,3 +58,14 @@ export function suggestOutDir(framework: Framework, cwd: string = process.cwd())
 export function hasPackageJson(cwd: string = process.cwd()): boolean {
   return existsSync(resolve(cwd, 'package.json'));
 }
+
+/**
+ * True when `outDir` lives under `public/` or `static/` — these dirs are
+ * served as-is by frameworks (Next/Astro/Nuxt/CRA/SvelteKit) and cannot be
+ * `import`ed by a bundler. Shared by `init` (skip typed index) and
+ * `emitIndex` (emit absolute-URL AGENTS.md snippet instead of an import).
+ */
+export function isStaticOutDir(outDir: string): boolean {
+  const norm = outDir.replace(/\\/g, '/').replace(/^\.\//, '');
+  return /^(public|static)(\/|$)/.test(norm);
+}

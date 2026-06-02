@@ -52,6 +52,15 @@ export function validateEndpointUrl(raw: string): string {
         `  Fix: use https://… or remove "endpoint" from magicpixel.json.`,
     );
   }
+  // Explicit allowlist of schemes. Anything outside { https, http } —
+  // file:, data:, javascript:, ws:, gopher:, etc. — is rejected up-front
+  // with a clearer message than the generic HTTPS error.
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    throw new Error(
+      `endpoint scheme "${url.protocol}" is not allowed.\n` +
+        `  Fix: use an https:// URL (http://localhost is allowed with MAGICPIXEL_ALLOW_INSECURE_ENDPOINT=1).`,
+    );
+  }
   if (url.username || url.password) {
     throw new Error(
       `endpoint must not embed credentials in the URL.\n` +
@@ -62,7 +71,10 @@ export function validateEndpointUrl(raw: string): string {
     return normalizeEndpointBase(url);
   }
   const allowInsecure = process.env.MAGICPIXEL_ALLOW_INSECURE_ENDPOINT === '1';
-  if (allowInsecure && url.protocol === 'http:' && (url.hostname === 'localhost' || url.hostname === '127.0.0.1')) {
+  if (allowInsecure && url.hostname === 'localhost') {
+    return normalizeEndpointBase(url);
+  }
+  if (allowInsecure && url.hostname === '127.0.0.1') {
     return normalizeEndpointBase(url);
   }
   throw new Error(
@@ -136,7 +148,8 @@ export async function readBodyWithLimit(res: Response, maxBytes: number): Promis
   return buf;
 }
 
-const MAX_GLOB_LEN = 256;
+/** Max length of a user-supplied picomatch glob; shared with config.ts. */
+export const MAX_GLOB_LEN = 256;
 
 /** Validate a user-supplied picomatch glob from the CLI. */
 export function assertSafeGlob(glob: string): string {
@@ -145,4 +158,31 @@ export function assertSafeGlob(glob: string): string {
     throw new Error(`invalid glob pattern (empty, too long, or contains null bytes).`);
   }
   return g;
+}
+
+/**
+ * Trim + validate a candidate `outDir`. Single source of truth shared by
+ * `init` (prompt-time) and `loadConfig` (file-time) so a path that survives
+ * one is guaranteed to survive the other.
+ *
+ * Returns the trimmed value. Throws on:
+ *   - empty / whitespace-only input
+ *   - any `..` segment or null byte
+ *   - absolute paths — otherwise an outDir like `/tmp/mp` would resolve to
+ *     itself and bypass the cwd-relative containment check in
+ *     `assertPathInsideRoot`, letting a manifest write outside the project
+ *     tree. `outDir` must always be relative to the project root.
+ */
+export function assertSafeOutDir(value: string): string {
+  const v = value.trim();
+  if (!v) {
+    throw new Error('outDir must not be empty.');
+  }
+  if (v.includes('\0') || v.split(/[/\\]/).some((seg) => seg === '..')) {
+    throw new Error('outDir must not contain ".." segments or null bytes.');
+  }
+  if (isAbsolute(v)) {
+    throw new Error('outDir must be a relative path (not absolute).');
+  }
+  return v;
 }

@@ -52,7 +52,22 @@ npx magicpixel sync --watch   # keeps assets fresh while you work
 npx magicpixel doctor
 ```
 
-Prints a one-screen diagnostic (CLI version, framework, outDir, key source, last sync, last error). Paste it to your AI agent — it's designed to be the only context they need.
+Prints a one-screen diagnostic (CLI version, framework, outDir, key source, last sync, last error, live manifest probe). Paste it to your AI agent — it's designed to be the only context they need.
+
+Behind a strict corporate proxy and the live probe times out? Add `--offline` to skip it. Need a machine-readable report? `magicpixel doctor --json | jq` — stable schema, no ANSI.
+
+When something's actually broken, `magicpixel repair` runs the full "turn it off and on again" recovery: validates your key, quarantines `state.json`, prunes empty subdirs, and triggers a clean `sync --full`. `--dry-run` previews the exact paths it would touch.
+
+## Production checklist
+
+Before shipping or onboarding a teammate, run through:
+
+1. **`magicpixel doctor`** — green network probe + populated key source.
+2. **`magicpixel repair --dry-run`** — review what a recovery would touch; nothing destructive should be flagged.
+3. **`magicpixel sync --full --dry-run`** — confirms the plan matches expectations (no surprise orphans/renames).
+4. **Watcher exit codes** — `sync --watch` exits `2` after 5 consecutive auth failures so your process supervisor (Vite plugin, systemd, pm2) can detect a revoked key. Make sure your supervisor surfaces non-zero exits.
+5. **`X-Request-Id` correlation** — every API response carries a request id. Friendly errors append `(request id: …)`; paste it in support threads and we can grep the edge logs in one shot.
+6. **Telemetry opt-out** — unexpected CLI failures (5xx + uncaught exceptions) are reported to `/admin/errors` so we can spot mass breakage without a support ping. Set `MAGICPIXEL_TELEMETRY=0` to disable; the full contract (what's filtered, what's sent, where) is in the [Telemetry](#telemetry) section below.
 
 
 ## Typed asset index (default on)
@@ -82,6 +97,7 @@ No bundler config, no runtime, no extra package.
 | `login [--key <key>]` | Save your API key to `.magicpixel/credentials` (mode `0600`). Validates against the server first. |
 | `logout` | Remove the stored API key. |
 | `doctor` | Print a one-screen diagnostic — paste it to your AI agent when something breaks. |
+| `repair [--dry-run] [-y]` | Self-heal a broken sync: validate key → quarantine `state.json` → prune empty dirs → full re-sync. |
 | `sync [...flags]` | Fetch manifest, diff against disk, download changed assets, prune orphans. |
 | `add <glob>` / `remove <glob>` | Manage `include` patterns. |
 | `list` | Print matching manifest as a table. |
@@ -92,7 +108,7 @@ No bundler config, no runtime, no extra package.
 
 | Flag | Meaning |
 | --- | --- |
-| `-w, --watch [seconds]` | Poll for changes (default 10s). Ideal during development. |
+| `-w, --watch [seconds]` | Poll for changes (default **2s**; auto-slows to 5s after ~3min idle, 10s after ~15min). Ideal during development. |
 | `--no-prune` | Keep local files not in the manifest (default: prune them on full syncs). |
 | `--dry-run` | Print plan, write nothing. |
 | `--full` | Ignore `lastSync`; re-fetch the full manifest. |
@@ -169,6 +185,19 @@ Every error message includes a `Fix:` block. Common ones:
 | `whoami` shows 0 assets | The key is bound to an empty project. Mint a key for the project that has art. |
 | `index.ts` doesn't update | Run `sync --full` once; renames may take a full pass to propagate. |
 | Files keep re-downloading | Your build system is rewriting PNGs. Sync into a dir your bundler reads but doesn't mutate. |
+
+## Telemetry
+
+Unexpected CLI failures (5xx server errors, uncaught exceptions) are
+reported fire-and-forget to MagicPixel so we can fix issues before users
+have to file them. We send: the error message + stack, command name, CLI
+version, Node version, OS platform, and the request id from the failed
+call. We never send file paths, asset names, configuration, environment
+variables, or your API key.
+
+Opt out: `MAGICPIXEL_TELEMETRY=0`. Reporting is also automatically skipped
+when no API key is configured or when `endpoint` in `magicpixel.json` points
+at a non-canonical host.
 
 ## What v1 does NOT do
 

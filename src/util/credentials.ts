@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, readFile, writeFile, unlink, chmod } from 'node:fs/promises';
+import { mkdir, readFile, unlink } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
+import { atomicWrite } from './atomicWrite.js';
 
 const CREDENTIALS_DIR = '.magicpixel';
 const CREDENTIALS_FILE = 'credentials';
@@ -34,13 +35,10 @@ export async function writeCredentials(apiKey: string, cwd: string = process.cwd
   const path = credentialsPath(cwd);
   await mkdir(dirname(path), { recursive: true });
   const body: StoredCredentials = { apiKey: apiKey.trim(), savedAt: new Date().toISOString() };
-  await writeFile(path, JSON.stringify(body, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
-  // Belt-and-suspenders: chmod again in case the file pre-existed with looser perms.
-  try {
-    await chmod(path, 0o600);
-  } catch {
-    // ignore (Windows or read-only FS)
-  }
+  // Atomic stage-and-rename. The mode is applied to the tmp file *before* the
+  // rename so the final credentials file is never world-readable for even a
+  // single tick (crash-window safety + perm-window safety in one call).
+  await atomicWrite(path, JSON.stringify(body, null, 2) + '\n', { mode: 0o600 });
   return path;
 }
 
@@ -67,7 +65,10 @@ export async function findKeyInDotenv(cwd: string = process.cwd()): Promise<{ fi
     try {
       const raw = await readFile(path, 'utf8');
       for (const line of raw.split('\n')) {
-        const m = line.match(/^\s*MAGICPIXEL_API_KEY\s*=\s*"?([^"\n#]+?)"?\s*$/);
+        // Anchored on the *exact* key name — otherwise `MAGICPIXEL_API_KEY_OLD`
+        // or `MAGICPIXEL_API_KEY_BACKUP` would silently match and return the
+        // wrong value. Allows optional `export` prefix and spaces around `=`.
+        const m = line.match(/^\s*(?:export\s+)?MAGICPIXEL_API_KEY\s*=\s*"?([^"\n#]+?)"?\s*(?:#.*)?$/);
         if (m && m[1]) return { file: name, value: m[1].trim() };
       }
     } catch {
@@ -81,4 +82,22 @@ export function describeKeySource(cwd: string = process.cwd()): 'env' | 'credent
   if (process.env.MAGICPIXEL_API_KEY) return 'env';
   if (readCredentialsSync(cwd)) return 'credentials-file';
   return 'none';
+}
+
+/**
+ * Best-effort read of the API key for *display only* (e.g. `status`,
+ * `doctor`). Honors the same precedence as `getApiKey()` but never throws and
+ * never validates — callers that need a real key should still use `getApiKey`.
+ *
+ * Returns `null` when no key is configured. The caller is responsible for
+ * masking before printing.
+ */
+export function readKeyForDisplay(
+  cwd: string = process.cwd(),
+): { value: string; source: 'env' | 'credentials-file' } | null {
+  const fromEnv = process.env.MAGICPIXEL_API_KEY?.trim();
+  if (fromEnv) return { value: fromEnv, source: 'env' };
+  const stored = readCredentialsSync(cwd);
+  if (stored) return { value: stored.apiKey, source: 'credentials-file' };
+  return null;
 }
