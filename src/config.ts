@@ -1,4 +1,4 @@
-import { readFile, mkdir, rename } from 'node:fs/promises';
+import { readFile, mkdir, rename, writeFile, chmod } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { assertSafeOutDir, MAX_GLOB_LEN, validateEndpointUrl } from './util/security.js';
@@ -204,11 +204,18 @@ export async function saveState(
   const path = statePath(cwd);
   try {
     await mkdir(dirname(path), { recursive: true });
-    // Atomic write: stage to a sibling tmp file then rename. Prevents a half-
-    // written state.json on crash/power-loss, which would then poison the next
-    // run (and require the corrupt-state recovery path above). Mode 0600
-    // because state.json sits next to the API-key-bearing credentials file.
-    await atomicWrite(path, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 });
+    // state.json is saved on every watch tick, so it must not use a visible
+    // stage-and-rename tmp path (`state.json.<pid>.<hex>.tmp`) that churns in
+    // VS Code / Vite file watchers. A torn state write is recoverable: loadState
+    // quarantines corrupt JSON and the next sync re-derives state from disk +
+    // manifest, so direct writeFile is the safer UX trade-off here. Keep
+    // atomicWrite for durable config/credentials/index writers.
+    await writeFile(path, JSON.stringify(state, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
+    try {
+      await chmod(path, 0o600);
+    } catch {
+      // Windows / read-only FS — ignore. The contents are non-secret sync state.
+    }
   } catch (e) {
     throw friendlyFsError(e, {
       operation: 'Saving sync state',

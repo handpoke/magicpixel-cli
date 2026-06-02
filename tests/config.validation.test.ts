@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadConfig, loadState, statePath } from '../src/config.js';
+import { loadConfig, loadState, saveState, statePath } from '../src/config.js';
 
 /**
  * loadConfig must surface friendly, multi-line errors for hand-edited
@@ -75,5 +75,14 @@ describe('loadState corrupt-quarantine recovery', () => {
     expect(existsSync(sPath)).toBe(false);
     const siblings = await readdir(join(dir, '.magicpixel'));
     expect(siblings.some((n) => n.startsWith('state.json.corrupt-'))).toBe(true);
+  });
+
+  it('saveState writes directly without creating state.json tmp files', async () => {
+    const sPath = statePath(dir);
+    await saveState({ lastSync: '2026-06-02T00:00:00.000Z', assets: { a: 'cards/tree' } }, dir);
+    const state = await loadState(dir);
+    expect(state.assets?.a).toBe('cards/tree');
+    const siblings = await readdir(join(dir, '.magicpixel'));
+    expect(siblings.filter((n) => /^state\.json\.\d+\.[0-9a-f]{16}\.tmp$/.test(n))).toEqual([]);
   });
 });

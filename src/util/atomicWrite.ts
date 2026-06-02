@@ -12,13 +12,13 @@ export interface AtomicWriteOpts {
 /**
  * Stage-and-rename file write. A crash mid-write can never leave a truncated
  * file on disk — the rename is atomic on every POSIX FS and on NTFS. Used
- * everywhere a corrupted target would break the project (state.json,
- * package.json, magicpixel.json, credentials, AGENTS.md, generated index files,
- * asset PNGs from `sync`).
+ * everywhere a corrupted target would break the project (package.json,
+ * magicpixel.json, credentials, AGENTS.md, generated index files). High-churn
+ * `state.json` saves and asset PNG writes intentionally use direct writeFile;
+ * see CHANGELOG 0.5.2/0.5.3 for the watcher/HMR trade-offs.
  *
- * Accepts `string | Uint8Array` so the asset-bytes writer in `sync` can reuse
- * this instead of duplicating the staging logic (one of the two prior leak
- * sites — see CHANGELOG 0.5.1).
+ * Accepts `string | Uint8Array` for callers that need binary-safe atomic
+ * writes, though asset bytes currently avoid this path for HMR compatibility.
  *
  * CRITICAL: On ANY failure between staging and rename, the tmp file is
  * unlinked before the original error is rethrown. Without this, every rare

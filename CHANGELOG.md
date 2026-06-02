@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.3] — 2026-06-02
+
+### Fixed
+
+- **Continuous `.magicpixel/state.json.<pid>.<hex>.tmp` churn in watch mode.**
+  `saveState()` still used `atomicWrite`, and because watch mode persists
+  state every poll, editors like VS Code visibly filled `.magicpixel/` with
+  staged `state.json.*.tmp` files before the rename landed or when file
+  watchers raced the staging path. State saves now use a direct `writeFile`
+  with `0600` permissions instead. This is safe because `state.json` is a
+  recoverable cache: if a process dies mid-write, `loadState()` already
+  quarantines corrupt JSON and the next sync re-derives the snapshot from the
+  manifest and local files. `atomicWrite` remains for durable config,
+  credentials, `AGENTS.md`, package metadata, and generated index files.
+
 ## [0.5.2] — 2026-06-02
 
 ### Fixed
