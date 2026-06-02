@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-06-02
+
+### Fixed
+
+- **Instant HMR for synced assets (regression from 0.5.1).** 0.5.1 routed
+  the per-asset PNG writer through `atomicWrite`, which stages a
+  `<name>.<pid>.<hex>.tmp` file and `rename()`s over the target. Vite's
+  chokidar watcher only collapses the resulting unlink/add pair when the
+  tmp filename starts with `.` or ends with `~` — ours matches neither, so
+  the target was observed as an `add` rather than a `change` and Vite did
+  not re-push the new image URL to the open browser. Users had to hard
+  refresh to see freshly-synced assets (e.g. after renaming an artboard).
+  The asset writer is back to a direct `writeFile(diskPath, bytes)` —
+  same inode, single `change` event, immediate HMR. Atomicity is not
+  needed for asset bytes (a torn write is self-healing on the next watch
+  tick via sha mismatch); `atomicWrite` remains in use for `state.json`,
+  credentials, `AGENTS.md`, `package.json`, and `magicpixel.json`, where
+  torn writes WOULD corrupt cross-run state. A regression-guard test
+  (`tests/sync.assetWriterDirect.test.ts`) pins this contract.
+
+## [0.5.1] — 2026-06-02
+
+### Fixed
+
+- **`.tmp` file leak in `atomicWrite` and the asset writer.** Every CLI write
+  that goes through `atomicWrite` (`state.json`, `package.json`,
+  `magicpixel.json`, credentials, `AGENTS.md`, the generated index) and the
+  inline tmp+rename in `sync` previously skipped cleanup when `rename()`
+  threw (FS hiccup, AV scan, racing writer, ENOSPC). Because `saveState`
+  fires every watch tick, even a low failure rate accumulated hundreds of
+  `<file>.<pid>.<hex>.tmp` files inside `.magicpixel/` and
+  `src/assets/magicpixel/<folder>/` — and they were invisible to the
+  `*.png`-only orphan walker. `atomicWrite` now wraps the write/chmod/rename
+  body in a `try { … } catch { unlink(tmp); throw }` block; the asset writer
+  in `sync` is reduced to a single `atomicWrite(diskPath, bytes)` call so
+  there's only one staging path left.
+- **Renamed artboard left the old PNG on disk in incremental mode.** When
+  `state.json` was stale (e.g. a victim of the `.tmp` leak above) the
+  rename detector couldn't correlate the new manifest entry to the prior
+  key, and the incremental code path skips the full orphan sweep. Sync now
+  has a sha-based fallback: for each download-bound entry whose `sha256`
+  matches a stranded local PNG (one whose disk path is not in the current
+  manifest), we record a synthetic `RenameInfo` and prune the stale PNG.
+  Same-bytes + manifest-no-longer-references-that-path is unambiguous
+  evidence of a rename and never deletes anything the user still owns.
+
+### Added
+
+- **Startup `.tmp` janitor.** `magicpixel sync` (one-shot and `--watch`)
+  sweeps stale `<file>.<pid>.<hex>.tmp` files left over from prior crashed
+  or killed runs across `outDir/**`, `.magicpixel/`, and the project root.
+  Pattern is anchored (`\.\d+\.[0-9a-f]{16}\.tmp$`) so user files with
+  `.tmp` in the name are never touched, and a 30-second age floor prevents
+  any race with a concurrent in-flight write.
+- **`atomicWrite` now accepts `Uint8Array` in addition to `string`** so the
+  asset-bytes writer in `sync` can share the same cleanup-guaranteed
+  staging logic as every other writer.
+
 ## [0.5.0] — 2026-06-02
 
 ### Added

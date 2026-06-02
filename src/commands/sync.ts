@@ -1,7 +1,7 @@
 import kleur from 'kleur';
 import ora, { type Ora } from 'ora';
 import { createHash } from 'node:crypto';
-import { mkdir, writeFile, unlink, rename, readdir, rm } from 'node:fs/promises';
+import { mkdir, unlink, readdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
 
@@ -11,7 +11,9 @@ import { fileSha256 } from '../util/hash.js';
 import { assetDiskPath, assetDiskPathFromKey, pruneEmptyDirs, walkOutDirPngs } from '../util/paths.js';
 import { createLimit } from '../util/limit.js';
 import { emitTypedIndex, ensureAgentsDoc, scanDiskAssets } from '../util/emitIndex.js';
-import { assertPathInsideRoot, tmpPathFor } from '../util/security.js';
+import { assertPathInsideRoot } from '../util/security.js';
+
+import { runTmpJanitor } from '../util/tmpJanitor.js';
 import { friendlyFsError } from '../util/errors.js';
 import { maxIsoTimestamp } from '../util/iso.js';
 import { formatBytes } from '../util/format.js';
@@ -43,6 +45,16 @@ interface SyncResult {
 }
 
 export async function syncCommand(opts: SyncOpts): Promise<void> {
+  // Sweep any leaked `<file>.<pid>.<hex>.tmp` files left behind by a prior
+  // crashed/killed CLI run before they pile up. Runs once per CLI invocation
+  // (watch mode included) and only touches files older than 30s, so it can
+  // never race a concurrent in-flight write. See util/tmpJanitor.ts.
+  try {
+    const cfg = await loadConfig();
+    await runTmpJanitor(cfg.outDir);
+  } catch {
+    /* janitor is best-effort — never let it block a sync */
+  }
   if (opts.watch) {
     await watchLoop(opts);
     return;
@@ -418,11 +430,55 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   // Orphan detection only when we have the full picture.
   // (Renames also produce a stale path on disk — collected separately below.)
   let orphans: string[] = [];
+  const remoteDiskPaths = new Set(manifest.map((e) => pathFor(e)));
+  // We walk local PNGs even in incremental mode so the sha-based rename
+  // fallback below has something to match against. The full-orphan path is
+  // still gated on `!since` to preserve incremental-mode safety (we never
+  // delete files outside what the current manifest delta touches).
+  const localPngs = await walkOutDirPngs(config.outDir);
   if (!since) {
-    const remoteDiskPaths = new Set(manifest.map((e) => pathFor(e)));
-    const localPngs = await walkOutDirPngs(config.outDir);
     orphans = localPngs.map((a) => a.abs).filter((p) => !remoteDiskPaths.has(p));
   }
+
+  // Heuristic-rename fallback for incremental mode.
+  //
+  // If `state.json` was lost or got out of sync (rare, but the 0.5.x leak of
+  // `state.json.<pid>.<hex>.tmp` files proved it happens in practice — see
+  // CHANGELOG 0.5.1), `previousAssets` won't have the mapping needed to mark
+  // a renamed artboard. The old `<oldSlug>.png` then lingers forever next to
+  // the new `<newSlug>.png` because incremental mode skips the full orphan
+  // sweep.
+  //
+  // Bridge that gap: for every download-bound entry, look for a stranded
+  // local PNG (path not in this manifest) whose sha256 matches the entry's.
+  // Same bytes + manifest no longer references that path = same artboard,
+  // renamed. We add the stranded path to `renameStalePaths` and record a
+  // RenameInfo so the CLI prints the migration hint.
+  if (since && toDownload.length > 0) {
+    const strandedBySha = new Map<string, string>();
+    for (const local of localPngs) {
+      if (remoteDiskPaths.has(local.abs)) continue;
+      const sha = await fileSha256(local.abs);
+      if (sha) strandedBySha.set(sha, local.abs);
+    }
+    if (strandedBySha.size > 0) {
+      const outRoot = resolve(process.cwd(), config.outDir);
+      const seenRenameIds = new Set(renamed.map((r) => r.id));
+      for (const entry of toDownload) {
+        if (!entry.sha256) continue;
+        if (seenRenameIds.has(entry.id)) continue;
+        const strandedPath = strandedBySha.get(entry.sha256);
+        if (!strandedPath) continue;
+        // Derive the disk key from the stranded path so the rename hint reads
+        // naturally (`cards/artboard-1 → cards/tree`).
+        const rel = relative(outRoot, strandedPath).replace(/\\/g, '/');
+        const oldKey = rel.endsWith('.png') ? rel.slice(0, -4) : rel;
+        renamed.push({ id: entry.id, oldKey, newKey: entry.key });
+        seenRenameIds.add(entry.id);
+      }
+    }
+  }
+
   // Stale paths from detected renames (always pruned, even in incremental mode —
   // otherwise the old PNG silently lingers next to the renamed copy).
   const renameStalePaths = renamed
@@ -553,14 +609,23 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
                 );
               }
             }
-            // Wrap any of mkdir/writeFile/rename so the user sees a friendly
+            // Wrap any of mkdir/writeFile so the user sees a friendly
             // multi-line diagnostic instead of a raw `EACCES: permission denied`.
+            //
+            // NOTE: Asset PNGs deliberately use a direct writeFile rather than
+            // atomicWrite. Vite's chokidar watcher only suppresses atomic-rename
+            // unlink/add pairs when the tmp filename starts with '.' or ends
+            // with '~'; our pattern <name>.<pid>.<hex>.tmp matches neither, so
+            // rename-over emits unlink+add instead of change, which breaks
+            // instant HMR for image imports in the browser (user has to hard
+            // refresh to see the new asset). A torn write here is self-healing
+            // on the next watch tick (re-download by sha mismatch), so the
+            // atomicity guarantee isn't worth the HMR regression. Do not
+            // "fix" this back to atomicWrite without also changing the
+            // tmp-name pattern AND verifying HMR end-to-end in a consumer app.
             try {
               await mkdir(dirname(diskPath), { recursive: true });
-              const tmp = tmpPathFor(diskPath);
-              assertPathInsideRoot(tmp, resolve(process.cwd(), config.outDir), 'outDir');
-              await writeFile(tmp, bytes);
-              await rename(tmp, diskPath);
+              await writeFile(diskPath, bytes);
             } catch (fsErr) {
               throw friendlyFsError(fsErr, {
                 operation: `Writing asset`,

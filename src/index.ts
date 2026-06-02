@@ -81,7 +81,7 @@ program
   .option('--json', 'Emit a stable JSON report (pipeable into jq or an LLM)')
   .option('--offline', 'Skip the live manifest probe (useful behind a strict proxy)')
   .addHelpText('after', '\nExamples:\n  $ magicpixel doctor\n  $ magicpixel doctor --json | jq .network\n')
-  .action(wrap("doctor", async (opts) => doctorCommand(opts)));
+  .action(wrap("doctor", async (opts) => doctorCommand(opts as Parameters<typeof doctorCommand>[0])));
 
 program
   .command('repair')
@@ -89,7 +89,7 @@ program
   .option('--dry-run', 'Print the plan without writing files')
   .option('-y, --yes', 'Skip the confirmation prompt before resetting state')
   .addHelpText('after', '\nExamples:\n  $ magicpixel repair --dry-run    # see what would change\n  $ magicpixel repair --yes        # non-interactive recovery\n')
-  .action(wrap("repair", async (opts) => repairCommand(opts)));
+  .action(wrap("repair", async (opts) => repairCommand(opts as Parameters<typeof repairCommand>[0])));
 
 program
   .command('sync')
@@ -101,7 +101,7 @@ program
   .option('-q, --quiet', 'Minimal output (for CI)')
   .option('-c, --concurrency <n>', 'Parallel downloads (1–16, default 6)', parseConcurrency)
   .addHelpText('after', '\nExamples:\n  $ magicpixel sync                # incremental sync\n  $ magicpixel sync --full         # ignore lastSync, re-check everything\n  $ magicpixel sync -w             # watch mode (2s; adaptive idle backoff; exit 2 after 5 auth failures)\n')
-  .action(wrap("sync", async (opts) => syncCommand(opts)));
+  .action(wrap("sync", async (opts) => syncCommand(opts as Parameters<typeof syncCommand>[0])));
 
 program
   .command('add <glob>')
