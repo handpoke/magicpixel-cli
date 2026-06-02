@@ -7,7 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-06-02
+
+### Added
+- **Legacy slug-folder sweep.** When a server-side slug rule change renames
+  a doc (e.g. `cards-2` → `cards`) and the prior id→key snapshot is missing
+  (fresh clone, CI runner, snapshot wipe), `sync` now detects top-level
+  `outDir` folders matching `<currentSlug>-<n>` for any slug known from the
+  manifest OR the prior persisted snapshot, and prunes them whole. Always
+  prints a `Legacy slug folders removed — update your imports:` block with
+  find/replace hints so users fix any source code references. Runs in both
+  full and incremental mode; respects `--no-prune`. Sibling slugs that are
+  themselves valid (e.g. a user-named `tiles-2/` next to `tiles/`) are
+  never deleted because the "known slugs" set unions the live manifest
+  with the persisted id→key map.
+
 ### Fixed
+
 - **`sync --watch 1` silently coerced to 2.** The commander validator
   accepted `1–3600` but the watch loop enforced a 2s floor via
   `Math.max(2, …)`, so `--watch 1` quietly ran at 2s with no warning.

@@ -1,7 +1,7 @@
 import kleur from 'kleur';
 import ora, { type Ora } from 'ora';
 import { createHash } from 'node:crypto';
-import { mkdir, writeFile, unlink, rename } from 'node:fs/promises';
+import { mkdir, writeFile, unlink, rename, readdir, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
 
@@ -433,12 +433,48 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   for (const p of renameStalePaths) orphanSet.add(p);
   orphans = [...orphanSet];
 
+  // Legacy-suffix folder sweep — always runs, even in incremental mode.
+  //
+  // Background: server-side slug uniqueness rules have changed over time
+  // (e.g. per-user → per-project). A doc that used to live under
+  // `outDir/cards-2/` may now report slug `cards` in the manifest. If the
+  // CLI's prior snapshot doesn't have the old id→key mapping (fresh clone,
+  // CI runner, snapshot wipe), rename detection finds nothing and the stale
+  // folder lingers next to the current one, breaking the user's imports of
+  // `@/assets/.../cards-2/...`.
+  //
+  // We detect this by looking for top-level disk folders whose name matches
+  // `<currentSlug>-<n>` for any slug currently in the manifest. Those are
+  // unambiguously legacy suffix collisions. We prune the whole folder
+  // (when --prune is on) and surface a clear "update your imports" notice
+  // so the user knows their source code references must be migrated.
+  // Build the "known top-level slugs" set from BOTH the current manifest AND
+  // the prior id→key snapshot. In incremental (`--watch`) mode the manifest
+  // only contains rows changed since `lastSync`, so a user with two
+  // legitimate sibling slugs (`tiles/` + `tiles-2/`) would lose `tiles-2/`
+  // the moment only `tiles` appeared in a delta. Pulling from
+  // `previousAssets` (the persisted full snapshot) closes that hole.
+  const knownFolderSlugs = new Set<string>();
+  for (const e of manifest) {
+    if (e.folder) knownFolderSlugs.add(e.folder.split('/')[0]);
+  }
+  for (const key of Object.values(previousAssets)) {
+    const top = key.split('/')[0];
+    if (top) knownFolderSlugs.add(top);
+  }
+  const legacyFolders = await findLegacySuffixFolders(config.outDir, knownFolderSlugs);
+
+
   if (verbose) {
     console.log();
     console.log(kleur.bold('Plan:'));
     console.log(`  ${kleur.green('+')} download ${toDownload.length}`);
     console.log(`  ${kleur.dim('=')} unchanged ${unchanged}${bytesSaved ? kleur.dim(` (~${formatBytes(bytesSaved)} saved)`) : ''}`);
     if (renamed.length) console.log(`  ${kleur.cyan('↪')} renamed ${renamed.length}`);
+    if (legacyFolders.length) {
+      const verb = shouldPrune ? kleur.red('delete') : kleur.yellow('keep');
+      console.log(`  ${verb} ${legacyFolders.length} legacy slug folder${legacyFolders.length === 1 ? '' : 's'}`);
+    }
     if (since && !renamed.length) {
       console.log(`  ${kleur.dim('orphan check skipped (incremental — use --full)')}`);
     } else if (orphans.length > 0) {
@@ -453,6 +489,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       console.log(kleur.dim('--dry-run: no files written.'));
       if (renamed.length > 0) printRenames(renamed, { withHints: false });
       if (orphans.length > 0) printOrphans(orphans);
+      if (legacyFolders.length > 0) printLegacyFolders(legacyFolders);
     }
     return {
       added: [],
@@ -465,6 +502,8 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       bytesSaved,
     };
   }
+
+
 
   const result: SyncResult = {
     added: [],
@@ -578,6 +617,37 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   } else if (verbose && orphans.length > 0) {
     printOrphans(orphans);
   }
+
+  // Legacy-suffix folder sweep. Runs in BOTH full and incremental mode so a
+  // user who is hot off a server-side slug rule change recovers without
+  // having to remember `--full`. Folders are deleted whole (children
+  // included) because every PNG inside is, by definition, stale; their
+  // canonical copies live under the de-suffixed folder we just downloaded.
+  if (shouldPrune && legacyFolders.length > 0) {
+    const outRoot = resolve(process.cwd(), config.outDir);
+    for (const lf of legacyFolders) {
+      assertPathInsideRoot(lf.abs, outRoot, 'outDir');
+      try {
+        await rm(lf.abs, { recursive: true, force: true });
+        // Push a synthetic key so the watch loop's changedCount picks this up
+        // (otherwise a tick that ONLY swept legacy folders reports "no changes").
+        result.removed.push(`${lf.legacyName}/ (legacy)`);
+        if (verbose) {
+          console.log(
+            `  ${kleur.red('-')} ${relative(process.cwd(), lf.abs)} ${kleur.dim(`(legacy slug — now ${lf.currentSlug}/)`)}`,
+          );
+        }
+      } catch (e) {
+        if (verbose) console.log(`  ${kleur.yellow('!')} failed to remove legacy folder ${relative(process.cwd(), lf.abs)}: ${(e as Error).message}`);
+      }
+    }
+    // Always surface the import-update notice — even in --quiet/watch mode
+    // — because user source code now references paths that no longer exist.
+    printLegacyFolders(legacyFolders);
+  } else if (verbose && legacyFolders.length > 0) {
+    printLegacyFolders(legacyFolders);
+  }
+
 
   // Always persist the id → key snapshot so rename detection survives even
   // when `emitIndex` is toggled off-then-on. `lastSync` only advances on a
@@ -735,6 +805,70 @@ function printOrphans(orphans: string[]) {
   }
   console.log(kleur.dim('  You passed --no-prune, so these were kept. Remove the flag to delete them.'));
 }
+
+export interface LegacyFolder {
+  /** Absolute path of the stale `<slug>-N/` folder on disk. */
+  abs: string;
+  /** Just the folder basename, e.g. `cards-2`. */
+  legacyName: string;
+  /** The de-suffixed slug currently in the manifest, e.g. `cards`. */
+  currentSlug: string;
+}
+
+/**
+ * Find top-level disk folders whose name matches `<currentSlug>-<n>` for some
+ * slug present in the manifest. These are unambiguously legacy artifacts
+ * from a server-side slug rule change (e.g. per-user → per-project
+ * uniqueness) — the canonical copy now lives under `<currentSlug>/`, and the
+ * suffixed folder's PNGs are stale.
+ *
+ * Only scans the FIRST level under outDir; nested folders are user content.
+ * Returns `[]` when outDir doesn't exist or when no remote slugs are known
+ * (defensive — never wipe folders when we have no manifest to compare to).
+ */
+export async function findLegacySuffixFolders(
+  outDir: string,
+  knownFolderSlugs: Set<string>,
+  cwd: string = process.cwd(),
+): Promise<LegacyFolder[]> {
+  if (knownFolderSlugs.size === 0) return [];
+  const root = resolve(cwd, outDir);
+  if (!existsSync(root)) return [];
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out: LegacyFolder[] = [];
+  for (const ent of entries) {
+    if (!ent.isDirectory()) continue;
+    if (ent.name.startsWith('.')) continue;
+    // Skip folders that ARE known slugs — only suffixed siblings are suspect.
+    if (knownFolderSlugs.has(ent.name)) continue;
+    const m = /^(.+)-(\d+)$/.exec(ent.name);
+    if (!m) continue;
+    const base = m[1];
+    if (!knownFolderSlugs.has(base)) continue;
+    out.push({
+      abs: resolve(root, ent.name),
+      legacyName: ent.name,
+      currentSlug: base,
+    });
+  }
+  return out;
+}
+
+function printLegacyFolders(legacy: LegacyFolder[]): void {
+  if (legacy.length === 0) return;
+  console.log();
+  console.log(kleur.bold('Legacy slug folders removed — update your imports:'));
+  for (const lf of legacy) {
+    console.log(`  ${kleur.red('-')} ${lf.legacyName}/  ${kleur.dim(`→ now ${lf.currentSlug}/`)}`);
+    console.log(`    ${kleur.dim(`Find/replace in your project:  ${lf.legacyName}/  →  ${lf.currentSlug}/`)}`);
+  }
+}
+
 
 // Note: orphan scan delegates to `walkOutDirPngs` in util/paths.ts (shared
 // with the typed-index emitter). `maxIsoTimestamp` lives in util/iso.ts.
