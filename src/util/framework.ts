@@ -1,8 +1,8 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
-export type Framework =
+export type ProjectKind =
   | 'Next.js'
   | 'Vite'
   | 'Remix'
@@ -11,10 +11,26 @@ export type Framework =
   | 'Astro'
   | 'Nuxt'
   | 'SvelteKit'
+  | 'Unity'
+  | 'Godot'
+  | 'GameMaker'
   | null;
 
-/** Read `package.json` and infer the framework from its dependencies. */
-export async function detectFramework(cwd: string = process.cwd()): Promise<Framework> {
+/** @deprecated alias — existing imports keep compiling */
+export type Framework = ProjectKind;
+
+const ENGINE_KINDS = new Set<string>(['Unity', 'Godot', 'GameMaker']);
+
+export function isEngineKind(kind: ProjectKind): kind is 'Unity' | 'Godot' | 'GameMaker' {
+  return kind !== null && ENGINE_KINDS.has(kind);
+}
+
+/** Typed `index.ts` is JS-only — game engines load PNGs directly. */
+export function supportsTypedIndex(kind: ProjectKind): boolean {
+  return !isEngineKind(kind);
+}
+
+async function detectJsKind(cwd: string): Promise<ProjectKind> {
   try {
     const pkgPath = resolve(cwd, 'package.json');
     if (!existsSync(pkgPath)) return null;
@@ -34,9 +50,33 @@ export async function detectFramework(cwd: string = process.cwd()): Promise<Fram
   }
 }
 
-/** Default `outDir` for a detected framework. */
-export function suggestOutDir(framework: Framework, cwd: string = process.cwd()): string {
-  switch (framework) {
+function detectEngineKind(cwd: string): ProjectKind {
+  if (existsSync(resolve(cwd, 'project.godot'))) return 'Godot';
+  if (existsSync(resolve(cwd, 'ProjectSettings', 'ProjectVersion.txt'))) return 'Unity';
+  try {
+    const yyp = readdirSync(cwd).find((name) => name.endsWith('.yyp'));
+    if (yyp) return 'GameMaker';
+  } catch {
+    // unreadable cwd — treat as no engine marker
+  }
+  return null;
+}
+
+/** Infer project kind from package.json deps, then engine marker files. */
+export async function detectProjectKind(cwd: string = process.cwd()): Promise<ProjectKind> {
+  const js = await detectJsKind(cwd);
+  if (js) return js;
+  return detectEngineKind(cwd);
+}
+
+/** @deprecated use `detectProjectKind` */
+export async function detectFramework(cwd: string = process.cwd()): Promise<Framework> {
+  return detectProjectKind(cwd);
+}
+
+/** Default `outDir` for a detected project kind. */
+export function suggestOutDir(kind: ProjectKind, cwd: string = process.cwd()): string {
+  switch (kind) {
     case 'Next.js':
     case 'Astro':
     case 'Nuxt':
@@ -48,8 +88,14 @@ export function suggestOutDir(framework: Framework, cwd: string = process.cwd())
     case 'Remix':
     case 'TanStack Start':
       return 'src/assets/magicpixel';
+    case 'Unity':
+      return 'Assets/MagicPixel';
+    case 'Godot':
+      return 'assets/magicpixel';
+    case 'GameMaker':
+      return 'datafiles/magicpixel';
     default:
-      // No framework detected — prefer src/ if present so the typed index is
+      // No kind detected — prefer src/ if present so the typed index is
       // importable; otherwise fall back to a top-level assets/ dir.
       return existsSync(resolve(cwd, 'src')) ? 'src/assets/magicpixel' : 'assets/magicpixel';
   }

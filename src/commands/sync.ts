@@ -17,6 +17,7 @@ import { runTmpJanitor } from '../util/tmpJanitor.js';
 import { friendlyFsError } from '../util/errors.js';
 import { maxIsoTimestamp } from '../util/iso.js';
 import { formatBytes } from '../util/format.js';
+import { computePreviousKeyOrphans } from '../util/previousKeyOrphans.js';
 
 interface SyncOpts {
   prune?: boolean;  // commander: defaults true; --no-prune sets false
@@ -487,6 +488,26 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   // De-duplicate vs the full-sync orphan list.
   const orphanSet = new Set(orphans);
   for (const p of renameStalePaths) orphanSet.add(p);
+
+  // Server-side rename history. Each manifest entry carries the composite
+  // keys this row was previously emitted under (populated by the editor when
+  // a doc/artboard is renamed). For each prior key whose file is still on
+  // disk and is NOT shadowed by a live manifest entry, we add a rename hint
+  // + prune target — so cruft like `untitled-19/untitled.png` evaporates on
+  // the next sync without the user having to clean it up manually.
+  const prevKeyResult = computePreviousKeyOrphans({
+    manifest,
+    remoteDiskPaths,
+    resolveDiskPath: (key) => assetDiskPathFromKey(config.outDir, key),
+    fileExists: existsSync,
+  });
+  for (const p of prevKeyResult.orphanPaths) orphanSet.add(p);
+  for (const r of prevKeyResult.renames) {
+    if (!renamed.some((x) => x.id === r.id && x.oldKey === r.oldKey)) {
+      renamed.push(r);
+    }
+  }
+
   orphans = [...orphanSet];
 
   // Legacy-suffix folder sweep — always runs, even in incremental mode.

@@ -2,7 +2,58 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { listEmptyDirs, pruneEmptyDirs } from '../src/util/paths.js';
+import {
+  assetDiskPath,
+  assetDiskPathFromKey,
+  listEmptyDirs,
+  pruneEmptyDirs,
+} from '../src/util/paths.js';
+import type { ManifestEntry } from '../src/api.js';
+
+function entry(over: Partial<ManifestEntry> & Pick<ManifestEntry, 'folder' | 'slug'>): ManifestEntry {
+  return {
+    id: 'x',
+    key: `${over.folder ? `${over.folder}/` : ''}${over.slug}`,
+    name: over.slug,
+    sha256: null,
+    width: null,
+    height: null,
+    updated_at: '2026-01-01T00:00:00Z',
+    size_bytes: null,
+    download_url: '',
+    previous_keys: [],
+    ...over,
+  };
+}
+
+describe('assetDiskPath (nested folders)', () => {
+  it('joins multi-segment folder under outDir', () => {
+    const p = assetDiskPath('out', entry({ folder: 'ui/cards', slug: 'stone' }), '/tmp');
+    expect(p).toBe(resolve('/tmp/out/ui/cards/stone.png'));
+  });
+
+  it('handles deeper nesting', () => {
+    const p = assetDiskPath('out', entry({ folder: 'a/b/c/d', slug: 'leaf' }), '/tmp');
+    expect(p).toBe(resolve('/tmp/out/a/b/c/d/leaf.png'));
+  });
+
+  it('falls back to root for null folder', () => {
+    const p = assetDiskPath('out', entry({ folder: null, slug: 'loose' }), '/tmp');
+    expect(p).toBe(resolve('/tmp/out/loose.png'));
+  });
+});
+
+describe('assetDiskPathFromKey (nested previous_keys)', () => {
+  it('treats every segment except the last as folder', () => {
+    expect(assetDiskPathFromKey('out', 'ui/cards/stone/front', '/tmp'))
+      .toBe(resolve('/tmp/out/ui/cards/stone/front.png'));
+  });
+
+  it('handles legacy 2-segment keys', () => {
+    expect(assetDiskPathFromKey('out', 'tiles/grass', '/tmp'))
+      .toBe(resolve('/tmp/out/tiles/grass.png'));
+  });
+});
 
 describe('listEmptyDirs', () => {
   let root: string;

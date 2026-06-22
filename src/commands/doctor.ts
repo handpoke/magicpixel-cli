@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve, relative } from 'node:path';
 import { loadConfig, loadState, resolveEndpoint, defaultConfig, type MagicPixelConfig } from '../config.js';
 import { describeKeySource, readKeyForDisplay } from '../util/credentials.js';
-import { detectFramework, hasPackageJson } from '../util/framework.js';
+import { detectProjectKind, hasPackageJson } from '../util/framework.js';
 import { safeFetch } from '../util/security.js';
 import { authHeaders } from '../util/authHeaders.js';
 import { CLI_VERSION } from '../version.js';
@@ -74,7 +74,7 @@ export async function doctorCommand(opts: DoctorOpts = {}): Promise<void> {
  * state on disk.
  */
 export async function collectDoctorReport(opts: DoctorOpts = {}): Promise<DoctorReport> {
-  const framework = await detectFramework();
+  const framework = await detectProjectKind();
   const pkgFound = hasPackageJson();
 
   let config: MagicPixelConfig | null = null;

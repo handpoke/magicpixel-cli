@@ -6,7 +6,7 @@ import { stdin, stdout } from 'node:process';
 import { resolve } from 'node:path';
 
 import { configPath, loadConfig } from '../config.js';
-import { hasPackageJson } from '../util/framework.js';
+import { detectProjectKind, hasPackageJson, isEngineKind } from '../util/framework.js';
 import { findKeyInDotenv, readCredentialsSync, writeCredentials } from '../util/credentials.js';
 import { initCommand } from './init.js';
 import { loginCommand } from './login.js';
@@ -27,8 +27,18 @@ export async function startCommand(opts: StartOpts = {}): Promise<void> {
   console.log(kleur.dim('  This walks you through getting your sprites onto disk.'));
   console.log();
 
-  // 1. Need a package.json — refuse to scaffold into a non-project directory.
+  // 1. `start` is JS-only — engine projects use init + login + sync --watch.
   if (!hasPackageJson()) {
+    const kind = await detectProjectKind();
+    if (isEngineKind(kind)) {
+      console.log(
+        kleur.yellow(
+          `  Detected ${kind}. \`magicpixel start\` is JS-only; run ` +
+            '`npx magicpixel init && npx magicpixel login && npx magicpixel sync --watch` instead.',
+        ),
+      );
+      return;
+    }
     console.log(
       kleur.yellow(
         '  MagicPixel needs a JavaScript project (package.json) to sync into.\n' +

@@ -19,6 +19,10 @@ export interface ManifestEntry {
   updated_at: string;
   size_bytes: number | null;
   download_url: string;
+  /** Composite keys this row was previously emitted under. The CLI uses these
+   *  to delete stale PNGs left behind after a doc/artboard rename. Optional
+   *  for backward compatibility with older edge-function deploys. */
+  previous_keys?: string[];
 }
 
 export interface ManifestResponse {

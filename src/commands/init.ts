@@ -6,7 +6,14 @@ import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 
 import { configPath, defaultConfig, saveConfig, type MagicPixelConfig } from '../config.js';
-import { detectFramework, suggestOutDir, hasPackageJson, isStaticOutDir } from '../util/framework.js';
+import {
+  detectProjectKind,
+  suggestOutDir,
+  hasPackageJson,
+  isStaticOutDir,
+  supportsTypedIndex,
+  isEngineKind,
+} from '../util/framework.js';
 import { assertSafeOutDir } from '../util/security.js';
 import { atomicWrite } from '../util/atomicWrite.js';
 
@@ -29,19 +36,19 @@ export async function initCommand(opts: InitOpts): Promise<void> {
   const config: MagicPixelConfig = { ...defaultConfig };
   let addGitignore = true;
 
-  const framework = await detectFramework();
-  const suggestedOutDir = suggestOutDir(framework);
+  const kind = await detectProjectKind();
+  const suggestedOutDir = suggestOutDir(kind);
   config.outDir = suggestedOutDir;
 
   const pkgExists = hasPackageJson();
   const pkgPath = resolve(process.cwd(), 'package.json');
-  let addWatchScript = pkgExists;
+  let addWatchScript = pkgExists && !isEngineKind(kind);
 
   if (interactive) {
     const rl = createInterface({ input: stdin, output: stdout });
     try {
       console.log(kleur.bold('Set up @magicpixelart/cli'));
-      if (framework) console.log(kleur.dim(`  Detected: ${framework}`));
+      if (kind) console.log(kleur.dim(`  Detected: ${kind}`));
       console.log();
 
       // Re-prompt loop: catch unsafe outDir values (null bytes, `..` segments)
@@ -61,9 +68,10 @@ export async function initCommand(opts: InitOpts): Promise<void> {
         }
       }
 
-      // Typed index only makes sense when the outDir is importable by a bundler.
-      // public/ and static/ are served as-is and cannot be imported.
-      if (!isStaticOutDir(config.outDir)) {
+      // Typed index only makes sense for JS projects with a bundler-importable outDir.
+      if (!supportsTypedIndex(kind)) {
+        config.emitIndex = false;
+      } else if (!isStaticOutDir(config.outDir)) {
         const emitAns = (await rl.question(
           `${kleur.cyan('?')} Emit a typed index.ts for autocomplete? ${kleur.dim('(Y/n)')} `,
         )).trim().toLowerCase();
@@ -78,7 +86,7 @@ export async function initCommand(opts: InitOpts): Promise<void> {
       )).trim().toLowerCase();
       addGitignore = giAns !== 'n' && giAns !== 'no';
 
-      if (pkgExists) {
+      if (pkgExists && !isEngineKind(kind)) {
         const wAns = (await rl.question(
           `${kleur.cyan('?')} Add a "${WATCH_SCRIPT_NAME}" script to package.json? ${kleur.dim('(Y/n)')} `,
         )).trim().toLowerCase();
@@ -88,12 +96,15 @@ export async function initCommand(opts: InitOpts): Promise<void> {
       rl.close();
     }
   } else {
-    config.emitIndex = !isStaticOutDir(config.outDir);
+    config.emitIndex = supportsTypedIndex(kind) && !isStaticOutDir(config.outDir);
   }
 
   await saveConfig(config);
   console.log();
   console.log(kleur.green('✓ wrote magicpixel.json'));
+  if (kind === 'GameMaker') {
+    console.log(kleur.dim("  Note: GameMaker doesn't auto-import — refresh Included Files after each sync."));
+  }
 
   if (addGitignore) {
     const added = await ensureGitignore();

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.4] — 2026-06-22
+
+### Added
+
+- **Game engine project detection.** `init` and `doctor` now recognize Unity
+  (`ProjectSettings/ProjectVersion.txt`), Godot (`project.godot`), and
+  GameMaker (root `*.yyp`) and suggest engine-conventional `outDir` defaults:
+  `Assets/MagicPixel`, `assets/magicpixel`, and `datafiles/magicpixel`.
+  JS framework detection still runs first (monorepo-safe). Engine projects
+  skip typed `index.ts` and npm watch-script prompts; GameMaker prints a
+  one-liner to refresh Included Files after sync. `magicpixel start` remains
+  JS-only and redirects engine users to `init → login → sync --watch`.
+
 ## [0.5.3] — 2026-06-02
 
 ### Fixed
