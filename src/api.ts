@@ -25,10 +25,22 @@ export interface ManifestEntry {
   previous_keys?: string[];
 }
 
+export interface ManifestProjectInfo {
+  /** UUID of the project the API key is scoped to. */
+  id: string;
+  /** Display name at the time of the request (may be null if lookup failed). */
+  name: string | null;
+  /** Populated only on empty fresh-sync responses: total assets in this project. */
+  totalInProject?: number;
+  /** Populated only on empty fresh-sync responses when totalInProject === 0. */
+  hint?: string;
+}
+
 export interface ManifestResponse {
   items: ManifestEntry[];
   nextCursor: string | null;
   count: number;
+  project?: ManifestProjectInfo;
 }
 
 interface FetchManifestOpts {
@@ -36,6 +48,22 @@ interface FetchManifestOpts {
   since?: string;
   cursor?: string;
   limit?: number;
+}
+
+/**
+ * Last-seen project metadata from any manifest response this process made.
+ * Populated as a side-effect of `fetchManifestPage`; read by `whoami`,
+ * `status`, and `sync` to surface `project: <name>` diagnostics.
+ *
+ * Never null after the first successful manifest call. Module-level so the
+ * three commands don't have to thread it through every helper.
+ */
+let lastProjectInfo: ManifestProjectInfo | null = null;
+export function getLastProjectInfo(): ManifestProjectInfo | null {
+  return lastProjectInfo;
+}
+export function __resetLastProjectInfoForTesting(): void {
+  lastProjectInfo = null;
 }
 
 /**
@@ -127,6 +155,28 @@ export async function fetchManifestPage(opts: FetchManifestOpts): Promise<Manife
           withRequestId('manifest: unexpected server response shape (items missing or non-string cursor).', serverRequestId),
           serverRequestId,
         );
+      }
+      // Capture the bound project's name/id from response headers (always
+      // present on 2xx). The body may also carry a richer `project` payload
+      // (empty fresh-sync case, includes totalInProject + hint). Prefer the
+      // body when present so `whoami`/`sync` can print the "0 assets in this
+      // project" nudge without another round-trip.
+      const projectId = res.headers.get('x-magicpixel-project-id');
+      const projectName = res.headers.get('x-magicpixel-project-name');
+      const bodyProject = (data as Partial<ManifestResponse>).project;
+      if (bodyProject && typeof bodyProject === 'object' && typeof bodyProject.id === 'string') {
+        lastProjectInfo = {
+          id: bodyProject.id,
+          name: typeof bodyProject.name === 'string' ? bodyProject.name : (projectName ?? null),
+          totalInProject: typeof (bodyProject as ManifestProjectInfo).totalInProject === 'number'
+            ? (bodyProject as ManifestProjectInfo).totalInProject
+            : undefined,
+          hint: typeof (bodyProject as ManifestProjectInfo).hint === 'string'
+            ? (bodyProject as ManifestProjectInfo).hint
+            : undefined,
+        };
+      } else if (projectId) {
+        lastProjectInfo = { id: projectId, name: projectName };
       }
       return data as ManifestResponse;
     }

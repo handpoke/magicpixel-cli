@@ -1,6 +1,6 @@
 import kleur from 'kleur';
 import { loadConfig, defaultConfig, resolveEndpoint, getApiKey, type MagicPixelConfig } from '../config.js';
-import { ApiError, retryTransient, retryAfterMsFromResponse } from '../api.js';
+import { ApiError, retryTransient, retryAfterMsFromResponse, getLastProjectInfo, type ManifestProjectInfo } from '../api.js';
 import { safeFetch } from '../util/security.js';
 import { authHeaders } from '../util/authHeaders.js';
 
@@ -8,10 +8,11 @@ interface WhoamiBody {
   count: number;
   items: Array<{ key: string }>;
   nextCursor: string | null;
+  project?: ManifestProjectInfo;
 }
 
 type WhoamiResult =
-  | { kind: 'ok'; body: WhoamiBody; serverRequestId: string }
+  | { kind: 'ok'; body: WhoamiBody; project: ManifestProjectInfo | null; serverRequestId: string }
   | { kind: 'rejected'; status: number; serverRequestId: string }
   | { kind: 'error'; status: number; bodyText: string; serverRequestId: string };
 
@@ -61,7 +62,24 @@ export async function whoamiCommand(): Promise<void> {
       items: Array.isArray(raw.items) ? raw.items.filter((i): i is { key: string } => !!i && typeof i.key === 'string') : [],
       nextCursor: typeof raw.nextCursor === 'string' && raw.nextCursor ? raw.nextCursor : null,
     };
-    return { kind: 'ok', body, serverRequestId };
+    // Prefer body.project (has totalInProject + hint on empty fresh syncs);
+    // fall back to response headers so paginated / non-empty responses still
+    // surface the bound project name. Kept in sync with fetchManifestPage.
+    const bodyProject = raw.project;
+    const projectId = res.headers.get('x-magicpixel-project-id');
+    const projectName = res.headers.get('x-magicpixel-project-name');
+    let project: ManifestProjectInfo | null = null;
+    if (bodyProject && typeof bodyProject === 'object' && typeof bodyProject.id === 'string') {
+      project = {
+        id: bodyProject.id,
+        name: typeof bodyProject.name === 'string' ? bodyProject.name : (projectName ?? null),
+        totalInProject: typeof bodyProject.totalInProject === 'number' ? bodyProject.totalInProject : undefined,
+        hint: typeof bodyProject.hint === 'string' ? bodyProject.hint : undefined,
+      };
+    } else if (projectId) {
+      project = { id: projectId, name: projectName };
+    }
+    return { kind: 'ok', body, project, serverRequestId };
   });
 
   if (result.kind === 'rejected') {
@@ -77,16 +95,38 @@ export async function whoamiCommand(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const { body } = result;
+  const { body, project } = result;
   const more = body.nextCursor ? '+' : '';
   console.log(kleur.green('✓ key valid'));
   console.log(`  endpoint: ${resolveEndpoint(config)}`);
+  if (project) {
+    const label = project.name ?? '(unnamed)';
+    console.log(`  project:  ${label} ${kleur.dim(`(${project.id.slice(0, 8)}…)`)}`);
+  }
   if (body.count === 0) {
-    console.log(`  visible:  ${kleur.yellow('0 assets — is the key bound to a project with content?')}`);
+    if (project?.hint) {
+      // Server-provided hint already names the project; use it verbatim.
+      console.log(`  visible:  ${kleur.yellow('0 assets')}`);
+      console.log(kleur.dim(`  ${project.hint}`));
+    } else if (project) {
+      console.log(
+        `  visible:  ${kleur.yellow(`0 assets in project "${project.name ?? project.id.slice(0, 8)}"`)}`,
+      );
+      console.log(
+        kleur.dim(
+          `  If your art lives in another project, create a key from that project's row in Settings → Projects & API Keys.`,
+        ),
+      );
+    } else {
+      console.log(`  visible:  ${kleur.yellow('0 assets — is the key bound to a project with content?')}`);
+    }
   } else {
     console.log(
       `  visible:  ${body.count}${more} asset${body.count === 1 && !more ? '' : 's'}` +
         ` (first: ${body.items[0]?.key ?? '-'})`,
     );
   }
+  // Reference the module-singleton to avoid an unused-import lint on the
+  // getLastProjectInfo helper (whoami reads project data inline).
+  void getLastProjectInfo;
 }

@@ -1,6 +1,6 @@
 import kleur from 'kleur';
 import { loadConfig, loadState, resolveEndpoint, type MagicPixelConfig } from '../config.js';
-import { fetchAllManifest } from '../api.js';
+import { fetchAllManifest, getLastProjectInfo } from '../api.js';
 import { fileSha256 } from '../util/hash.js';
 import { assetDiskPath } from '../util/paths.js';
 import { readKeyForDisplay } from '../util/credentials.js';
@@ -69,10 +69,18 @@ export async function statusCommand(): Promise<void> {
         }),
       ),
     );
-    console.log(`  remote assets: ${manifest.length}`);
+    const project = getLastProjectInfo();
+    const projectSuffix = project ? kleur.dim(` (project: ${project.name ?? project.id.slice(0, 8)})`) : '';
+    console.log(`  remote assets: ${manifest.length}${projectSuffix}`);
     console.log(`  ${kleur.dim('=')} unchanged: ${unchanged}`);
     console.log(`  ${kleur.yellow('~')} changed:   ${changed}`);
     console.log(`  ${kleur.green('+')} missing:   ${missing}`);
+    if (manifest.length === 0 && project?.hint) {
+      // Fresh sync into an empty-project key — surface the server's hint so
+      // a project mismatch is one glance away instead of a silent zero.
+      console.log();
+      console.log(kleur.yellow(`  ${project.hint}`));
+    }
   } catch (e) {
     console.log(kleur.red(`  manifest fetch failed: ${(e as Error).message.split('\n')[0]}`));
   }

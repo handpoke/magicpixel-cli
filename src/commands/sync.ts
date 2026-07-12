@@ -6,7 +6,7 @@ import { existsSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
 
 import { loadConfig, loadState, saveState, type SyncState } from '../config.js';
-import { fetchAllManifest, fetchAssetBytes, ApiError, type ManifestEntry } from '../api.js';
+import { fetchAllManifest, fetchAssetBytes, ApiError, getLastProjectInfo, type ManifestEntry } from '../api.js';
 import { fileSha256 } from '../util/hash.js';
 import { assetDiskPath, assetDiskPathFromKey, pruneEmptyDirs, walkOutDirPngs } from '../util/paths.js';
 import { createLimit } from '../util/limit.js';
@@ -376,9 +376,21 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   let manifest: ManifestEntry[];
   try {
     manifest = await fetchAllManifest(config, since);
+    const projectInfo = getLastProjectInfo();
+    const projectSuffix = projectInfo && verbose
+      ? kleur.dim(` · project: ${projectInfo.name ?? projectInfo.id.slice(0, 8)}`)
+      : '';
     spinner?.succeed(
-      `Manifest: ${manifest.length} asset${manifest.length === 1 ? '' : 's'}${since ? kleur.dim(' (incremental)') : ''}`,
+      `Manifest: ${manifest.length} asset${manifest.length === 1 ? '' : 's'}${since ? kleur.dim(' (incremental)') : ''}${projectSuffix}`,
     );
+    // Fresh full sync + zero assets = almost always a project-scope mismatch
+    // (the exact case the "0 assets" support flow hits). Server includes a
+    // ready-to-print hint on the empty-fresh-sync response; surface it once
+    // so the user isn't left wondering why sync "did nothing".
+    if (!since && manifest.length === 0 && projectInfo?.hint && verbose) {
+      console.log();
+      console.log(kleur.yellow(`! ${projectInfo.hint}`));
+    }
   } catch (e) {
     spinner?.fail('Manifest fetch failed');
     throw e;

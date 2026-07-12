@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.5] — 2026-07-12
+
+### Added
+
+- **Bound project name in `whoami` / `status` / `sync`.** Manifest responses
+  now expose the API key's project via `x-magicpixel-project-*` headers and an
+  optional `project` body field. The CLI surfaces `project: <name>` so a
+  key-bound-to-the-wrong-project mistake is obvious at a glance. On empty
+  fresh syncs the server may also send `totalInProject` + a ready-to-print
+  `hint`; `whoami`, `status`, and verbose `sync` print it instead of a silent
+  zero. Old servers without the headers keep working — the project line is
+  simply omitted.
+
 ## [0.5.4] — 2026-06-22
 
 ### Added
