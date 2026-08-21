@@ -30,7 +30,8 @@ describe('fetchAllManifest shape guard', () => {
 
   it('rejects {items: null} with a friendly ApiError', async () => {
     // Fresh response per attempt — retryTransient retries 502, and a single
-    // Response body can only be read once.
+    // Response body can only be read once. Five attempts × backoff exceeds
+    // vitest's default 5s, so this test owns a longer budget.
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
       jsonResponse({ items: null, nextCursor: null, count: 0 }),
     );
@@ -38,12 +39,12 @@ describe('fetchAllManifest shape guard', () => {
       status: 502,
       message: expect.stringMatching(/unexpected server response shape/),
     });
-  });
+  }, 15_000);
 
   it('rejects a non-object response', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () => jsonResponse(null));
     await expect(fetchAllManifest(config)).rejects.toMatchObject({ status: 502 });
-  });
+  }, 15_000);
 });
 
 describe('assertKeyValid retry behavior', () => {

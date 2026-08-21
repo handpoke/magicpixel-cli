@@ -51,6 +51,12 @@ function isCanonicalEndpoint(endpoint: string): boolean {
 export function shouldReportCliError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   if (err instanceof ApiError) {
+    // 546 is a Supabase Edge Runtime platform code (worker boot / CPU /
+    // wall-time). It bypasses our function's try/catch and is almost always
+    // transient. Retries usually absorb it; a leaked-to-user 546 is still
+    // unactionable noise on /admin/errors. Persistent worker failures still
+    // surface as 500/502/503, which remain reported.
+    if (err.status === 546) return false;
     // User/config issues have actionable fix hints already; don't add noise.
     return err.status >= 500;
   }

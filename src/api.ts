@@ -101,6 +101,11 @@ function friendly(status: number, body: string, context: string): string {
   if (status === 429) {
     return `${context}: 429 — rate limited. Retry shortly.`;
   }
+  if (status === 546) {
+    // Supabase Edge Runtime platform code — worker boot / CPU / wall-time.
+    // Not one of ours; typically clears in seconds.
+    return `${context}: 546 — MagicPixel edge worker restarting. Retried automatically; if this persists, retry in ~30s.`;
+  }
   if (status >= 500) {
     return `${context}: ${status} — MagicPixel server error. Retry shortly; status at https://magicpixel.art.`;
   }
@@ -200,7 +205,10 @@ export async function fetchManifestPage(opts: FetchManifestOpts): Promise<Manife
  *   request-id of the most recent attempt.
  */
 export async function retryTransient<T>(context: string, fn: () => Promise<T>): Promise<T> {
-  const maxAttempts = 3;
+  // 5 attempts × (500ms, 1s, 2s, 4s) = ~7.5s of coverage. Enough to ride out
+  // a Supabase edge worker recycle (546) or a brief 5xx without surfacing to
+  // the user; short enough that a real outage still fails within one sync tick.
+  const maxAttempts = 5;
   let lastErr: Error | null = null;
   let nextDelayMs = 0;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -224,7 +232,7 @@ export async function retryTransient<T>(context: string, fn: () => Promise<T>): 
         nextDelayMs = 0;
       }
       if (attempt < maxAttempts) {
-        const backoffMs = 250 * 2 ** (attempt - 1);
+        const backoffMs = 500 * 2 ** (attempt - 1);
         await new Promise((r) => setTimeout(r, Math.max(nextDelayMs, backoffMs)));
       }
     }

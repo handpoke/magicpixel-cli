@@ -14,6 +14,10 @@ describe('shouldReportCliError', () => {
     }
   });
 
+  it('skips 546 edge-runtime blips (platform, unactionable)', () => {
+    expect(shouldReportCliError(new ApiError(546, 'boot'))).toBe(false);
+  });
+
   it('skips commander argument errors', () => {
     const e = new Error('expected an integer');
     e.name = 'InvalidArgumentError';

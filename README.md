@@ -1,6 +1,8 @@
 # @magicpixelart/cli
 
-Sync MagicPixel pixel-art assets to your local project as flattened PNGs. Zero runtime — just files on disk that your bundler picks up.
+Sync your [MagicPixel](https://magicpixel.art) pixel-art assets to your local project as flattened PNGs. Zero runtime — just files on disk that your bundler picks up.
+
+MagicPixel is an [AI pixel art generator](https://magicpixel.art) for game developers: generate new pixel art, reskin and remix the assets you already have, and finish them in a full browser editor — then pull them straight into your repo with this CLI. It also exposes a [Model Context Protocol server](https://magicpixel.art/guides/connect) so Claude, ChatGPT, and Cursor can generate assets for you, and a [Vite plugin](https://www.npmjs.com/package/@magicpixelart/vite) that syncs on save with no second terminal.
 
 ## Install
 
@@ -204,6 +206,14 @@ at a non-canonical host.
 - Layer JSON sync (PNG only)
 - A runtime JS SDK (your bundler already handles PNG imports)
 - Cross-user asset sharing
+
+## More about MagicPixel
+
+- [AI pixel art generator](https://magicpixel.art) — generate new pixel art, and reskin or remix the assets you already have.
+- [Pixel art editor](https://magicpixel.art/pixel-art-editor) — palette remapping, components, pixel-accurate cleanup, and animation frames.
+- [Generating game sprites with AI](https://magicpixel.art/guides/generating-sprites) — the workflow for game-ready assets.
+- [Editing AI pixel art](https://magicpixel.art/guides/editing-ai-art) — cleaning up and iterating on generated sprites.
+- [Connect an AI agent over MCP](https://magicpixel.art/guides/connect) — Claude, ChatGPT, and Cursor.
 
 ## License
 

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.6] — 2026-08-21
+
+### Changed
+
+- **README positioning.** Lead with generation, reskins/variants, the full
+  browser editor, and MCP/CLI instead of sprites/tilesets/direction sheets.
+
+### Fixed
+
+- **Transient Supabase 546 (edge worker recycle).** Friendly error copy for
+  status 546, five retry attempts with a longer backoff (~7.5s coverage), and
+  546s are no longer reported as telemetry noise. Persistent 5xx still reports.
+  Shape-guard tests that exhaust those retries now use a 15s budget so CI
+  matches the new backoff.
+
 ## [0.5.5] — 2026-07-12
 
 ### Added
