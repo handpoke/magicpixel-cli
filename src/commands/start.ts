@@ -20,26 +20,17 @@ interface StartOpts {
 /**
  * One-command bootstrap for new users. Runs init → key prompt → first sync →
  * prints copy-pasteable watch instructions. Designed so a non-technical user
- * can paste `npx @magicpixelart/cli start` and end up with sprites on disk and a watch
- * script ready to run.
+ * can paste `npx @magicpixelart/cli start` and end up with game sprites in
+ * MagicPixel (and flagged sprites back on disk) plus a watch script.
  */
 export async function startCommand(opts: StartOpts = {}): Promise<void> {
   console.log(kleur.bold('🪄  MagicPixel — first-run setup'));
-  console.log(kleur.dim('  This walks you through getting your sprites onto disk.'));
+  console.log(kleur.dim('  This connects your game project so existing sprites show up in MagicPixel.'));
   console.log();
 
-  // 1. `start` is JS-only — engine projects use init + login + sync --watch.
-  if (!hasPackageJson()) {
-    const kind = await detectProjectKind();
-    if (isEngineKind(kind)) {
-      console.log(
-        kleur.yellow(
-          `  Detected ${kind}. \`${cmd('start')}\` is JS-only; run ` +
-            `\`${cmd('init')} && ${cmd('login')} && ${cmd('sync')} --watch\` instead.`,
-        ),
-      );
-      return;
-    }
+  const kind = await detectProjectKind();
+  // Engine projects have no package.json requirement. JS projects still need one.
+  if (!hasPackageJson() && !isEngineKind(kind)) {
     console.log(
       kleur.yellow(
         '  MagicPixel needs a JavaScript project (package.json) to sync into.\n' +
@@ -88,7 +79,7 @@ export async function startCommand(opts: StartOpts = {}): Promise<void> {
   //    failures without throwing — snapshot around the call so we don't
   //    print a misleading green "you're set up" over a half-failed run.
   console.log();
-  console.log(kleur.bold('Step: first sync'));
+  console.log(kleur.bold('Step: import + sync'));
   const exitBefore = process.exitCode ?? 0;
   await syncCommand({ full: true });
   const firstSyncFailed = (process.exitCode ?? 0) > exitBefore;

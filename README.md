@@ -138,6 +138,7 @@ Sync is built to be cheap: a no-op run is one small manifest request, zero PNG b
 | `emitIndex`| `boolean`  | `true`                  | Emit `<outDir>/index.ts` with typed asset map.   |
 | `unityPpu` | `number?`  | `32`                    | Unity only: pixels-per-unit in generated `.meta`. |
 | `unitySyncAll` | `boolean?` | `false`             | Unity only: sync every artboard, not just those flagged in the editor. |
+| `push`     | `boolean?` | `true`                  | Upload local PNG changes to MagicPixel on every `sync`. Set `false` for pull-only. |
 | `endpoint` | `string?`  | production URL          | Override the API base (testing only). Must be **HTTPS**. |
 
 State (`.magicpixel/state.json`) tracks `lastSync` (file mode `0600`). Add `.magicpixel/` to `.gitignore` (init offers to do this).

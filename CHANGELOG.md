@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.8] — 2026-08-26
+
+### Added
+
+- **Connect imports game sprites.** `sync` (and `sync --watch`) now runs `push`
+  automatically so connecting a game project imports existing sprites into the
+  MagicPixel library, flagged Sync to Unity so they appear under Connected.
+  `"push": false` in `magicpixel.json` opts out.
+- **First-connect import.** On Unity/Godot/GameMaker, PNGs under `Assets/` /
+  `assets/` / `datafiles/` are copied into `outDir` if they aren't there yet
+  (skipping Library/Temp/Packages, never overwriting) and then adopted.
+  Root-level PNGs (`hero.png`) adopt as a single-artboard document instead of
+  being skipped.
+
 ## [0.5.7] — 2026-08-26
 
 ### Added

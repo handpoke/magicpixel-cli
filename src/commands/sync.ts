@@ -25,6 +25,7 @@ import { maxIsoTimestamp } from '../util/iso.js';
 import { formatBytes } from '../util/format.js';
 import { computePreviousKeyOrphans } from '../util/previousKeyOrphans.js';
 import { cmd } from '../util/invoke.js';
+import { runPush } from './push.js';
 
 interface SyncOpts {
   prune?: boolean;  // commander: defaults true; --no-prune sets false
@@ -437,16 +438,15 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     }
 
     if (filtered.noneFlagged) {
-      // Every artboard is explicitly opted out. Pruning here would delete the
-      // user's whole sprite folder off the back of an unchecked box, so bail
-      // out with a hint instead.
+      // Nothing flagged for pull — don't dump the library, and don't prune.
+      // Local sprites still go up so they appear in MagicPixel on connect.
       if (verbose) {
         console.log();
-        console.log(kleur.yellow('! No artboards are flagged "Sync to Unity" — nothing to sync.'));
-        console.log(kleur.dim('  Fix: right-click an artboard in MagicPixel → "Sync to Unity",'));
-        console.log(kleur.dim('  or set "unitySyncAll": true in magicpixel.json to sync everything.'));
+        console.log(kleur.yellow('! No artboards are flagged "Sync to Unity" — nothing to pull.'));
+        console.log(kleur.dim('  Existing game sprites will still be imported into MagicPixel.'));
+        console.log(kleur.dim('  Flag folders/artboards in the library to pull them back into Unity.'));
       }
-      return {
+      const empty: SyncResult = {
         added: [],
         modified: [],
         removed: [],
@@ -456,6 +456,8 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
         bytesSaved: 0,
         renamed: [],
       };
+      await maybePushLocalSprites(config.push, verbose);
+      return empty;
     }
     const skipped = manifest.length - filtered.entries.length;
     manifest = filtered.entries;
@@ -521,8 +523,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   // delete files outside what the current manifest delta touches).
   const localPngs = await walkOutDirPngs(config.outDir);
   // Sprites created in Unity (or any PNG we never pulled) are pending a
-  // `magicpixel push`, not orphans — see prunePolicy.ts.
-  let pendingPush: string[] = [];
+  // push into MagicPixel, not orphans — see prunePolicy.ts.
   if (!since) {
     const trackedPaths = new Set(
       Object.keys(state.synced ?? {})
@@ -543,7 +544,6 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       isTracked: (p) => trackedPaths.has(p),
     });
     orphans = policy.orphans;
-    pendingPush = policy.pendingPush;
   }
 
 
@@ -988,21 +988,25 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     // would print each rename twice.
     printChanges(result, '  ', { includeRenames: renamed.length === 0 });
     if (renamed.length > 0) printRenames(renamed, { withHints: true });
-    if (pendingPush.length > 0) {
-      console.log();
-      console.log(
-        kleur.yellow(
-          `! ${pendingPush.length} local sprite${pendingPush.length === 1 ? '' : 's'} ${pendingPush.length === 1 ? 'is' : 'are'} not in MagicPixel yet — kept on disk.`,
-        ),
-      );
-      console.log(kleur.dim(`  Fix: run \`${cmd('push')}\` to add them to your library.`));
-    }
   }
 
-
+  await maybePushLocalSprites(config.push, verbose);
 
   if (result.failed) process.exitCode = 1;
   return result;
+}
+
+async function maybePushLocalSprites(pushEnabled: boolean | undefined, verbose: boolean): Promise<void> {
+  if (pushEnabled === false) return;
+  try {
+    await runPush({ quiet: !verbose });
+  } catch (e) {
+    if (verbose) {
+      console.log();
+      console.log(kleur.yellow(`! could not import local sprites into MagicPixel: ${(e as Error).message}`));
+      console.log(kleur.dim(`  Fix: run \`${cmd('push')}\` once the connection is healthy.`));
+    }
+  }
 }
 
 const CHANGE_PRINT_CAP = 50;

@@ -47,9 +47,15 @@ describe('planPush', () => {
     });
   });
 
-  it('skips root-level unknown files (no document segment)', () => {
-    const [a] = planPush([candidate('loose', 's')], synced);
-    expect(a.kind).toBe('skip');
+  it('adopts a root-level PNG as a single-artboard document', () => {
+    const [a] = planPush([candidate('loose', 's')], {});
+    expect(a).toEqual({
+      kind: 'adopt',
+      key: 'loose',
+      path: ['loose', 'loose'],
+      pathNames: ['loose', 'loose'],
+      name: 'loose',
+    });
   });
 
   it('caps adopt paths at the server segment limit', () => {
@@ -80,7 +86,7 @@ describe('planPush — legacy rows', () => {
   });
 
   it('tags unusable adopt paths with a distinct reason', () => {
-    const [a] = planPush([{ key: 'solo', segments: ['solo'], diskSha256: 's' }], {});
-    expect(a).toEqual({ kind: 'skip', key: 'solo', reason: 'unusable-path' });
+    const [a] = planPush([{ key: '!!!', segments: ['!!!'], diskSha256: 's' }], {});
+    expect(a).toEqual({ kind: 'skip', key: '!!!', reason: 'unusable-path' });
   });
 });

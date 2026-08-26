@@ -85,9 +85,15 @@ export function planPush(
       });
       continue;
     }
-    // New on disk → adopt. Needs at least a document + artboard segment.
-    const pathNames = c.segments.slice(-MAX_PUSH_PATH_SEGMENTS);
-    const path = pathNames.map(pushSlug);
+    // New on disk → adopt. A single segment (outDir/hero.png) is a document
+    // with one artboard of the same name — the server already accepts that.
+    const rawNames = c.segments.slice(-MAX_PUSH_PATH_SEGMENTS);
+    let pathNames = rawNames;
+    let path = pathNames.map(pushSlug);
+    if (path.length === 1 && path[0]) {
+      pathNames = [pathNames[0], pathNames[0]];
+      path = [path[0], path[0]];
+    }
     if (path.length < 2 || path.some((s) => !s)) {
       out.push({ kind: 'skip', key: c.key, reason: 'unusable-path' });
       continue;
