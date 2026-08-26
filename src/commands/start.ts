@@ -25,20 +25,23 @@ interface StartOpts {
  */
 export async function startCommand(opts: StartOpts = {}): Promise<void> {
   console.log(kleur.bold('🪄  MagicPixel — first-run setup'));
-  console.log(kleur.dim('  This connects your game project so existing sprites show up in MagicPixel.'));
+  console.log(kleur.dim('  This links your game project. Sprites are indexed locally; nothing is imported until you connect a working set.'));
   console.log();
 
   const kind = await detectProjectKind();
-  // Engine projects have no package.json requirement. JS projects still need one.
+  // Engine projects (including Unity UPM packages) have no package.json
+  // requirement. JS projects still need one.
   if (!hasPackageJson() && !isEngineKind(kind)) {
     console.log(
       kleur.yellow(
-        '  MagicPixel needs a JavaScript project (package.json) to sync into.\n' +
-          '  Run this inside your project folder — the one with package.json.',
+        '  MagicPixel needs a game project to sync into.\n' +
+          '  Run this inside your Unity, Godot, GameMaker, or JavaScript folder\n' +
+          '  (Unity package, project with Assets/, or a folder with package.json).',
       ),
     );
     return;
   }
+  if (kind) console.log(kleur.dim(`  Detected: ${kind}`));
 
   // 2. Run init non-interactively unless config already exists AND is valid.
   // A broken `magicpixel.json` (hand-edited / truncated) used to slip past
@@ -78,10 +81,20 @@ export async function startCommand(opts: StartOpts = {}): Promise<void> {
   // 5. First sync. syncCommand sets `process.exitCode = 1` on download
   //    failures without throwing — snapshot around the call so we don't
   //    print a misleading green "you're set up" over a half-failed run.
+  //    Manifest 546s throw after still importing local sprites; catch so
+  //    the watch instructions below aren't swallowed.
   console.log();
-  console.log(kleur.bold('Step: import + sync'));
+  console.log(kleur.bold('Step: sync'));
   const exitBefore = process.exitCode ?? 0;
-  await syncCommand({ full: true });
+  try {
+    await syncCommand({ full: true });
+  } catch (e) {
+    const err = e as Error;
+    console.error(kleur.red(err.message ?? String(e)));
+    process.exitCode = 1;
+    const { reportCliError } = await import('../util/telemetry.js');
+    await reportCliError(err, { command: 'start' });
+  }
   const firstSyncFailed = (process.exitCode ?? 0) > exitBefore;
 
   // 6. Tell the user how to run the watch loop. If `init` couldn't patch
@@ -102,6 +115,9 @@ export async function startCommand(opts: StartOpts = {}): Promise<void> {
   } else {
     console.log(`  ${kleur.green('▶')} ${kleur.bold(`${cmd('sync')} --watch`)}   ${kleur.dim('# keeps sprites fresh while you edit them in MagicPixel')}`);
   }
+  console.log();
+  console.log(kleur.dim(`  Find sprites with \`${cmd('search')} hero\`, then \`${cmd('connect')} 'assets/Sprites/**'\` to add a working set.`));
+  console.log(kleur.dim('  Connected sprites write back to their original game path. New MagicPixel art lands in outDir.'));
   console.log();
   if (await hasDevScript()) {
     const watchCmd = hasWatch ? 'npm run magicpixel:watch' : `${cmd('sync')} --watch`;

@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { afterEach, beforeEach, vi } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   assertPathInsideRoot,
   assertSafeAssetSegments,
   assertSafeGlob,
+  assertSafeIoPath,
   assertSafeOutDir,
   safeFetch,
+  sanitizeSourceRel,
   validateEndpointUrl,
 } from '../src/util/security.js';
 
@@ -73,10 +78,49 @@ describe('assertSafeGlob', () => {
   it('trims and accepts a normal glob', () => {
     expect(assertSafeGlob('  **/*  ')).toBe('**/*');
   });
-  it('rejects empty / null-byte / oversized globs', () => {
+  it('rejects empty / null-byte / oversized / parent-traversal globs', () => {
     expect(() => assertSafeGlob('')).toThrow(/invalid glob/);
     expect(() => assertSafeGlob('bad\0glob')).toThrow(/invalid glob/);
     expect(() => assertSafeGlob('x'.repeat(257))).toThrow(/invalid glob/);
+    expect(() => assertSafeGlob('../Assets/**')).toThrow(/\.\./);
+    expect(() => assertSafeGlob('Assets/../secret/**')).toThrow(/\.\./);
+  });
+});
+
+describe('sanitizeSourceRel', () => {
+  it('accepts a relative png and rejects traversal, absolute, and non-png', () => {
+    expect(sanitizeSourceRel('Assets/Sprites/hero.png')).toBe('Assets/Sprites/hero.png');
+    expect(sanitizeSourceRel('./Assets/hero.png')).toBe('Assets/hero.png');
+    expect(sanitizeSourceRel('../outside.png')).toBeNull();
+    expect(sanitizeSourceRel('Assets/../package.json')).toBeNull();
+    expect(sanitizeSourceRel('Assets/Scripts/Player.cs')).toBeNull();
+    expect(sanitizeSourceRel('/tmp/x.png')).toBeNull();
+    expect(sanitizeSourceRel('C:\\Windows\\x.png')).toBeNull();
+    expect(sanitizeSourceRel('foo//bar.png')).toBeNull();
+  });
+});
+
+describe('assertSafeIoPath', () => {
+  it('allows a regular file and a missing path whose parent stays in-root', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mp-io-'));
+    mkdirSync(join(root, 'Assets'));
+    const png = join(root, 'Assets', 'hero.png');
+    writeFileSync(png, 'x');
+    await expect(assertSafeIoPath(png, root)).resolves.toBeUndefined();
+    await expect(assertSafeIoPath(join(root, 'Assets', 'new.png'), root, { forWrite: true })).resolves.toBeUndefined();
+  });
+
+  it('refuses a symlink even when the lexical path is inside the project', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mp-io-'));
+    const outside = mkdtempSync(join(tmpdir(), 'mp-io-out-'));
+    writeFileSync(join(outside, 'secret.png'), 'secret');
+    const link = join(root, 'hero.png');
+    try {
+      symlinkSync(join(outside, 'secret.png'), link);
+    } catch {
+      return; // filesystem may not allow symlinks
+    }
+    await expect(assertSafeIoPath(link, root, { forWrite: true })).rejects.toThrow(/symlink/);
   });
 });
 

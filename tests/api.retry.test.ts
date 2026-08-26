@@ -68,4 +68,21 @@ describe('retryTransient', () => {
     // 5 attempts × 2 invocations above = 10 total.
     expect(fn).toHaveBeenCalledTimes(10);
   }, 30_000);
+
+  it('gives a persistent 546 extra attempts only when asked (manifest)', async () => {
+    const noop = async () => {};
+    const boot = new ApiError(546, 'boot', 'req-546-long');
+    const fn546 = vi.fn().mockRejectedValue(boot);
+    await expect(retryTransient('manifest', fn546, { sleep: noop, max546Attempts: 7 })).rejects.toBe(boot);
+    expect(fn546).toHaveBeenCalledTimes(7);
+
+    const fn546default = vi.fn().mockRejectedValue(boot);
+    await expect(retryTransient('download', fn546default, noop)).rejects.toBe(boot);
+    expect(fn546default).toHaveBeenCalledTimes(5);
+
+    const down = new ApiError(503, 'down', 'req-503');
+    const fn503 = vi.fn().mockRejectedValue(down);
+    await expect(retryTransient('ctx', fn503, noop)).rejects.toBe(down);
+    expect(fn503).toHaveBeenCalledTimes(5);
+  });
 });

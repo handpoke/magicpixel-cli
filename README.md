@@ -16,13 +16,22 @@ Requires Node.js ≥ 18.
 
 ## Quickstart
 
-One command, inside your project folder (the one with `package.json`):
+One command, inside your game project — a JavaScript app (`package.json`), a
+Unity project or UPM package (`Assets`/`assets`, `Editor`/`Runtime`), Godot
+(`project.godot`), or GameMaker (`*.yyp`):
 
 ```bash
 npx @magicpixelart/cli start
 ```
 
-That walks you through everything: detects your framework, writes `magicpixel.json`, prompts for your API key (paste it from [magicpixel.art/settings](https://magicpixel.art/settings) → API Keys), pulls your sprites, and tells you how to keep them fresh.
+That walks you through everything: detects your framework, writes `magicpixel.json`, prompts for your API key (paste it from [magicpixel.art/settings](https://magicpixel.art/settings) → API Keys), pulls flagged sprites, and indexes game PNGs locally. Nothing is imported into the library until you connect a working set:
+
+```bash
+npx @magicpixelart/cli search hero
+npx @magicpixelart/cli connect 'assets/Sprites/**'
+```
+
+Connected sprites write back to their original game path. New MagicPixel-only art still lands in `outDir`.
 
 When it finishes:
 
@@ -101,7 +110,9 @@ No bundler config, no runtime, no extra package.
 | `doctor` | Print a one-screen diagnostic — paste it to your AI agent when something breaks. |
 | `repair [--dry-run] [-y]` | Self-heal a broken sync: validate key → quarantine `state.json` → prune empty dirs → full re-sync. |
 | `sync [...flags]` | Fetch manifest, diff against disk, download changed assets, prune orphans. |
-| `push [--dry-run] [--flatten]` | Upload local PNG edits (and new sprites) back to MagicPixel. |
+| `push [--dry-run] [--flatten]` | Upload local PNG edits (and the `connect` working set) back to MagicPixel. |
+| `connect <glob>` | Add a game-sprite glob to the working set and ingest matching PNGs. |
+| `search <query>` | Search indexed game PNGs (no network). |
 | `add <glob>` / `remove <glob>` | Manage `include` patterns. |
 | `list` | Print matching manifest as a table. |
 | `status` | Config, last sync, diff vs remote. |
@@ -135,10 +146,11 @@ Sync is built to be cheap: a no-op run is one small manifest request, zero PNG b
 | `outDir`   | `string`   | framework-dependent     | Where PNGs (and `index.ts`) are written.         |
 | `include`  | `string[]` | `["**/*"]`              | Globs (picomatch) matched against `folder/slug`. |
 | `exclude`  | `string[]` | `[]`                    | Globs to exclude.                                |
+| `connect`  | `string[]` | `[]`                    | Working-set globs of game PNGs to adopt into Connected. Empty = index only. |
 | `emitIndex`| `boolean`  | `true`                  | Emit `<outDir>/index.ts` with typed asset map.   |
 | `unityPpu` | `number?`  | `32`                    | Unity only: pixels-per-unit in generated `.meta`. |
 | `unitySyncAll` | `boolean?` | `false`             | Unity only: sync every artboard, not just those flagged in the editor. |
-| `push`     | `boolean?` | `true`                  | Upload local PNG changes to MagicPixel on every `sync`. Set `false` for pull-only. |
+| `push`     | `boolean?` | `true`                  | Upload local PNG changes (outDir + `connect` working set) to MagicPixel on every `sync`. Set `false` for pull-only. |
 | `endpoint` | `string?`  | production URL          | Override the API base (testing only). Must be **HTTPS**. |
 
 State (`.magicpixel/state.json`) tracks `lastSync` (file mode `0600`). Add `.magicpixel/` to `.gitignore` (init offers to do this).

@@ -146,9 +146,9 @@ export async function fetchManifestPage(opts: FetchManifestOpts): Promise<Manife
   if (opts.cursor) url.searchParams.set('cursor', opts.cursor);
   if (opts.limit) url.searchParams.set('limit', String(opts.limit));
 
-  // Reuse the same transient-failure policy as asset downloads: 3 attempts,
-  // exponential backoff, honor Retry-After on 429/5xx. Network blips and
-  // brief edge restarts otherwise blow up the whole sync mid-pagination.
+  // Reuse the same transient-failure policy as asset downloads, with extra
+  // 546 attempts so first-run can ride out a worker recycle without stalling
+  // every PNG download for ~30s.
   return retryTransient(`manifest`, async () => {
     const { headers, requestId } = buildHeaders();
     const res = await safeFetch(url.href, { headers });
@@ -203,26 +203,43 @@ export async function fetchManifestPage(opts: FetchManifestOpts): Promise<Manife
       serverRequestId,
       retryAfterMsFromResponse(res),
     );
-  });
+  }, { max546Attempts: 7 });
 }
 
+type RetrySleep = (ms: number) => Promise<void>;
+interface RetryOpts {
+  sleep?: RetrySleep;
+  /** 546-only attempt cap. Defaults to the same 5 as other 5xx so PNG
+   *  downloads don't stall ~30s each during a recycle. Manifest fetches
+   *  pass 7 so first-run can ride out a worker boot. */
+  max546Attempts?: number;
+}
+
+const defaultRetrySleep: RetrySleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 /**
- * Run `fn` up to 3 times, backing off on network errors, 429, and 5xx.
+ * Run `fn` with exponential backoff on network errors, 429, and 5xx.
  * Non-retryable ApiErrors (4xx other than 429) bubble immediately.
  *
  * - `ApiError.retryAfterMs` (populated from a `Retry-After` header on 429/5xx)
  *   wins over the default exponential backoff for the *next* attempt.
  * - Network/transport failures are wrapped once with a friendly hint and the
  *   request-id of the most recent attempt.
+ *
+ * The 3rd argument may be a sleep function (tests) or an options bag.
  */
-export async function retryTransient<T>(context: string, fn: () => Promise<T>): Promise<T> {
-  // 5 attempts × (500ms, 1s, 2s, 4s) = ~7.5s of coverage. Enough to ride out
-  // a Supabase edge worker recycle (546) or a brief 5xx without surfacing to
-  // the user; short enough that a real outage still fails within one sync tick.
+export async function retryTransient<T>(
+  context: string,
+  fn: () => Promise<T>,
+  opts: RetrySleep | RetryOpts = {},
+): Promise<T> {
+  const sleep = (typeof opts === 'function' ? opts : opts.sleep) ?? defaultRetrySleep;
   const maxAttempts = 5;
+  const max546Attempts =
+    typeof opts === 'function' ? maxAttempts : (opts.max546Attempts ?? maxAttempts);
   let lastErr: Error | null = null;
   let nextDelayMs = 0;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  for (let attempt = 1; ; attempt++) {
     try {
       return await fn();
     } catch (e) {
@@ -232,9 +249,6 @@ export async function retryTransient<T>(context: string, fn: () => Promise<T>): 
         lastErr = err;
         nextDelayMs = err.retryAfterMs ?? 0;
       } else {
-        // Network/transport failure — wrap once with the existing hint.
-        // Preserve the original error as `cause` so `--verbose` consumers
-        // and Node's default printer can still surface the underlying stack.
         lastErr = new Error(
           `${context}: network error (${err.message}).\n` +
             `  Fix: check your internet connection and that the MagicPixel API is reachable.`,
@@ -242,10 +256,11 @@ export async function retryTransient<T>(context: string, fn: () => Promise<T>): 
         );
         nextDelayMs = 0;
       }
-      if (attempt < maxAttempts) {
-        const backoffMs = 500 * 2 ** (attempt - 1);
-        await new Promise((r) => setTimeout(r, Math.max(nextDelayMs, backoffMs)));
-      }
+      const allowed =
+        lastErr instanceof ApiError && lastErr.status === 546 ? max546Attempts : maxAttempts;
+      if (attempt >= allowed) break;
+      const backoffMs = Math.min(500 * 2 ** (attempt - 1), 16_000);
+      await sleep(Math.max(nextDelayMs, backoffMs));
     }
   }
   throw lastErr ?? new Error(`${context}: unknown error`);

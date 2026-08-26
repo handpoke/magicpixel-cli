@@ -1,7 +1,7 @@
 import { readFile, mkdir, rename, writeFile, chmod } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { assertSafeOutDir, MAX_GLOB_LEN, validateEndpointUrl } from './util/security.js';
+import { assertSafeOutDir, MAX_GLOB_LEN, sanitizeSourceRel, validateEndpointUrl } from './util/security.js';
 import { readCredentialsSync } from './util/credentials.js';
 import { friendlyFsError } from './util/errors.js';
 import { atomicWrite } from './util/atomicWrite.js';
@@ -28,6 +28,11 @@ export interface MagicPixelConfig {
   unitySyncAll?: boolean;
   /** Disk → MagicPixel on every `sync`. Set false for pull-only. Default true. */
   push?: boolean;
+  /**
+   * Working-set globs (picomatch subset) of game PNGs to adopt into Connected.
+   * Empty means index-only: nothing is ingested until `magicpixel connect`.
+   */
+  connect: string[];
 }
 
 
@@ -40,8 +45,22 @@ export interface MagicPixelConfig {
 export interface SyncedSprite {
   assetId: string;
   layerIdx: number;
-  /** Composite sha256 the CLI last wrote to disk for this key. */
+  /**
+   * Cloud composite sha256 (conflict baseline for `push` updates). For
+   * connected game files this is often *not* the original PNG on disk —
+   * MagicPixel re-encodes on ingest. Skip decisions use `diskSha256`.
+   */
   sha256: string;
+  /**
+   * sha256 of the file bytes last seen on disk. Connected originals keep this
+   * even when it differs from the cloud composite, so watch/push do not
+   * re-upload thousands of unchanged game PNGs every tick.
+   */
+  diskSha256?: string;
+  /** `lstat` mtime (ms) of the file when `diskSha256` was recorded. */
+  diskMtimeMs?: number;
+  /** `lstat` size of the file when `diskSha256` was recorded. */
+  diskSize?: number;
   /** Layer count of the artboard — a >1 push needs an explicit `--flatten`. */
   layers?: number;
   /**
@@ -50,6 +69,12 @@ export interface SyncedSprite {
    * duplicate document.
    */
   legacy?: boolean;
+  /**
+   * Original game-tree path (cwd-relative). Write-back always requires this
+   * path to still exist in the live connect index; the field only aliases a
+   * cloud composite key onto that indexed PNG.
+   */
+  sourceRel?: string;
 }
 
 
@@ -69,6 +94,7 @@ export const defaultConfig: MagicPixelConfig = {
   outDir: 'src/assets/magicpixel',
   include: ['**/*'],
   exclude: [],
+  connect: [],
   emitIndex: true,
 };
 
@@ -106,6 +132,7 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<MagicPixe
   }
   const include = normalizeGlobList(parsed.include ?? defaultConfig.include, 'include');
   const exclude = normalizeGlobList(parsed.exclude ?? defaultConfig.exclude, 'exclude');
+  const connect = normalizeGlobList(parsed.connect ?? defaultConfig.connect, 'connect');
   const rawOutDir = typeof parsed.outDir === 'string' && parsed.outDir.trim() ? parsed.outDir : defaultConfig.outDir;
   let outDir: string;
   try {
@@ -160,6 +187,7 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<MagicPixe
     unityPpu,
     unitySyncAll: parsed.unitySyncAll === true ? true : undefined,
     push: parsed.push === false ? false : undefined,
+    connect,
   };
 }
 
@@ -192,6 +220,12 @@ function normalizeGlobList(value: unknown, field: string): string[] {
       throw new Error(
         `${CONFIG_FILENAME}: "${field}" entry is too long (>${MAX_GLOB_LEN} chars) or contains a null byte.\n` +
           `  Fix: shorten the pattern.`,
+      );
+    }
+    if (g.split(/[/\\]/).some((seg) => seg === '..')) {
+      throw new Error(
+        `${CONFIG_FILENAME}: "${field}" must not contain ".." segments.\n` +
+          `  Fix: use a project-relative glob such as "Assets/Sprites/**".`,
       );
     }
     out.push(g);
@@ -229,7 +263,7 @@ export async function loadState(cwd: string = process.cwd()): Promise<SyncState>
     return {};
   }
   try {
-    return JSON.parse(raw) as SyncState;
+    return scrubLoadedState(JSON.parse(raw) as SyncState);
   } catch (e) {
     // Corrupt state file (truncated by a crash, hand-edited, disk full, etc.)
     // Quarantine it so the user can recover/inspect, then fall back to a full
@@ -249,6 +283,24 @@ export async function loadState(cwd: string = process.cwd()): Promise<SyncState>
     }
     return {};
   }
+}
+
+/** Drop untrusted persisted sourceRel so a hand-edited state.json cannot leak into later saves. */
+function scrubLoadedState(state: SyncState): SyncState {
+  const synced = state.synced;
+  if (!synced || typeof synced !== 'object' || Array.isArray(synced)) return state;
+  const next: Record<string, SyncedSprite> = {};
+  for (const [key, val] of Object.entries(synced)) {
+    if (!val || typeof val !== 'object') continue;
+    const sprite: SyncedSprite = { ...val };
+    if (sprite.sourceRel !== undefined) {
+      const safe = sanitizeSourceRel(sprite.sourceRel);
+      if (safe) sprite.sourceRel = safe;
+      else delete sprite.sourceRel;
+    }
+    next[key] = sprite;
+  }
+  return { ...state, synced: next };
 }
 
 export async function saveState(

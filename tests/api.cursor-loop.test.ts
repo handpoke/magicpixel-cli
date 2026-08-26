@@ -8,6 +8,7 @@ const config: MagicPixelConfig = {
   outDir: 'tmp',
   include: ['**/*'],
   exclude: [],
+  connect: [],
   emitIndex: false,
 };
 

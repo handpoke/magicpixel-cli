@@ -8,24 +8,23 @@ import { dirname, relative, resolve } from 'node:path';
 import { loadConfig, loadState, saveState, type SyncedSprite, type SyncState } from '../config.js';
 import { fetchAllManifest, fetchAssetBytes, ApiError, getLastProjectInfo, type ManifestEntry } from '../api.js';
 import { fileSha256 } from '../util/hash.js';
-import { assetDiskPath, assetDiskPathFromKey, pruneEmptyDirs, walkOutDirPngs } from '../util/paths.js';
+import { pruneEmptyDirs, walkOutDirPngs } from '../util/paths.js';
 import { createLimit } from '../util/limit.js';
 import { emitTypedIndex, ensureAgentsDoc, scanDiskAssets } from '../util/emitIndex.js';
-import { assertPathInsideRoot } from '../util/security.js';
-import { detectProjectKind } from '../util/framework.js';
+import { assertPathInsideRoot, assertSafeIoPath } from '../util/security.js';
+import { detectProjectKind, isEngineKind } from '../util/framework.js';
+import { indexGamePngs, matchConnectGlobs, GAME_INDEX_CAP_HINT, connectCapMessage, type GameIndex } from '../util/gameScan.js';
+import { collectSourceRelMap, isPathInside, syncDiskPathFromKey } from '../util/syncPath.js';
 import { DEFAULT_UNITY_PPU, writeMissingUnityMetas } from '../util/unityMeta.js';
 import { filterUnityManifest } from '../util/unityFilter.js';
 import { selectFullSyncOrphans } from '../util/prunePolicy.js';
-
-
-
 import { runTmpJanitor } from '../util/tmpJanitor.js';
 import { friendlyFsError } from '../util/errors.js';
 import { maxIsoTimestamp } from '../util/iso.js';
 import { formatBytes } from '../util/format.js';
 import { computePreviousKeyOrphans } from '../util/previousKeyOrphans.js';
 import { cmd } from '../util/invoke.js';
-import { runPush } from './push.js';
+import { runPush, type PushSummary } from './push.js';
 
 interface SyncOpts {
   prune?: boolean;  // commander: defaults true; --no-prune sets false
@@ -401,6 +400,17 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     }
   } catch (e) {
     spinner?.fail('Manifest fetch failed');
+    // One-shot sync / first-run: still import local sprites (ingest is a
+    // different host). Watch ticks skip this — otherwise a 546 would POST
+    // every PNG every poll.
+    if (!runOpts.watchMode) {
+      const pushed = await maybePushLocalSprites(config.push, verbose);
+      if (verbose && pushed && pushed.created > 0) {
+        console.log();
+        console.log(kleur.green(`✓ pushed ${pushed.created} working-set sprite${pushed.created === 1 ? '' : 's'} into MagicPixel anyway.`));
+        console.log(kleur.dim('  Refresh Connected in the library to see them, then re-run sync to pull.'));
+      }
+    }
     throw e;
   }
 
@@ -408,9 +418,31 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   // editor (parity with the in-app sync button). `unitySyncAll: true` in
   // magicpixel.json opts back into everything.
   const projectKind = await detectProjectKind();
+  const gameIndex = isEngineKind(projectKind)
+    ? await indexGamePngs(projectKind, process.cwd(), config.outDir)
+    : { files: [], capped: false };
+  const connected = matchConnectGlobs(gameIndex, config.connect ?? []);
+  const sourceByKey = collectSourceRelMap(connected.entries, state.synced);
+  if (verbose && gameIndex.capped) {
+    console.log(kleur.yellow(`! ${GAME_INDEX_CAP_HINT}`));
+  }
+  if (verbose && connected.capped) {
+    console.log(kleur.yellow(`! ${connectCapMessage(connected.total, connected.entries.length)}`));
+  }
+  if (verbose && isEngineKind(projectKind)) {
+    console.log(
+      kleur.dim(
+        `  game index → ${gameIndex.files.length} PNG${gameIndex.files.length === 1 ? '' : 's'} · working set ${connected.entries.length}` +
+          (connected.capped ? ` of ${connected.total} matched` : ''),
+      ),
+    );
+  }
+  const pathForKey = (key: string): string =>
+    syncDiskPathFromKey(config.outDir, key, sourceByKey);
   // Files whose artboard is no longer flagged for Unity. Deleted even in
   // incremental mode: un-checking the box in the editor must actually remove
   // the sprite from the game project, not leave a stale copy behind.
+  // Working-set (sourceRel) files are never deleted — they're the user's art.
   const deselectedPaths: string[] = [];
   // Sprites whose "Sync to Unity" flag the server omitted. Not downloaded
   // (strict opt-in) but explicitly shielded from pruning: a transient server
@@ -429,11 +461,12 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     const unknownSet = new Set(filtered.unknown);
     for (const entry of manifest) {
       if (filtered.entries.includes(entry)) continue;
-      const p = assetDiskPath(config.outDir, entry);
+      const p = pathForKey(entry.key);
       if (unknownSet.has(entry)) {
         unknownFlagPaths.add(p);
         continue;
       }
+      if (sourceByKey.has(entry.key)) continue;
       if (existsSync(p)) deselectedPaths.push(p);
     }
 
@@ -443,7 +476,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       if (verbose) {
         console.log();
         console.log(kleur.yellow('! No artboards are flagged "Sync to Unity" — nothing to pull.'));
-        console.log(kleur.dim('  Existing game sprites will still be imported into MagicPixel.'));
+        console.log(kleur.dim(`  Working-set sprites (\`connect\` in magicpixel.json) still push into MagicPixel.`));
         console.log(kleur.dim('  Flag folders/artboards in the library to pull them back into Unity.'));
       }
       const empty: SyncResult = {
@@ -456,7 +489,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
         bytesSaved: 0,
         renamed: [],
       };
-      await maybePushLocalSprites(config.push, verbose);
+      await maybePushLocalSprites(config.push, verbose, gameIndex);
       return empty;
     }
     const skipped = manifest.length - filtered.entries.length;
@@ -478,13 +511,18 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     }
   }
 
+  for (const r of renamed) {
+    const rel = sourceByKey.get(r.oldKey);
+    if (rel && !sourceByKey.has(r.newKey)) sourceByKey.set(r.newKey, rel);
+  }
+
   // Compute the disk path once per entry and reuse it across the diff /
   // orphan / download loops — saves three resolves + two security asserts
   // per asset on large projects. Every entry in `manifest` is pre-seeded, so
   // the lookup never misses; non-null assertion is safe.
   const diskPathById = new Map<string, string>();
   for (const entry of manifest) {
-    diskPathById.set(entry.id, assetDiskPath(config.outDir, entry));
+    diskPathById.set(entry.id, pathForKey(entry.key));
   }
   const pathFor = (entry: ManifestEntry): string => diskPathById.get(entry.id)!;
 
@@ -530,7 +568,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
         .concat(Object.values(previousAssets))
         .map((key) => {
           try {
-            return assetDiskPathFromKey(config.outDir, key);
+            return pathForKey(key);
           } catch {
             return '';
           }
@@ -588,14 +626,22 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
 
   // Stale paths from detected renames (always pruned, even in incremental mode —
   // otherwise the old PNG silently lingers next to the renamed copy).
+  const outRoot = resolve(process.cwd(), config.outDir);
   const renameStalePaths = renamed
-    .map((r) => assetDiskPathFromKey(config.outDir, r.oldKey))
-    .filter((p) => existsSync(p));
+    .map((r) => {
+      try {
+        return pathForKey(r.oldKey);
+      } catch {
+        return '';
+      }
+    })
+    .filter((p) => p && existsSync(p) && isPathInside(p, outRoot));
   // De-duplicate vs the full-sync orphan list.
   const orphanSet = new Set(orphans);
   for (const p of renameStalePaths) orphanSet.add(p);
   // Un-checked "Sync to Unity" artboards: their PNG (and .meta) leaves the
-  // Unity project on the next sync, incremental or not.
+  // Unity project on the next sync, incremental or not. Working-set originals
+  // are never in this list.
   for (const p of deselectedPaths) orphanSet.add(p);
 
 
@@ -608,10 +654,12 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   const prevKeyResult = computePreviousKeyOrphans({
     manifest,
     remoteDiskPaths,
-    resolveDiskPath: (key) => assetDiskPathFromKey(config.outDir, key),
+    resolveDiskPath: (key) => pathForKey(key),
     fileExists: existsSync,
   });
-  for (const p of prevKeyResult.orphanPaths) orphanSet.add(p);
+  for (const p of prevKeyResult.orphanPaths) {
+    if (isPathInside(p, outRoot)) orphanSet.add(p);
+  }
   for (const r of prevKeyResult.renames) {
     if (!renamed.some((x) => x.id === r.id && x.oldKey === r.oldKey)) {
       renamed.push(r);
@@ -755,13 +803,16 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
             // "fix" this back to atomicWrite without also changing the
             // tmp-name pattern AND verifying HMR end-to-end in a consumer app.
             try {
+              await assertSafeIoPath(diskPath, process.cwd(), { forWrite: true });
               await mkdir(dirname(diskPath), { recursive: true });
               await writeFile(diskPath, bytes);
             } catch (fsErr) {
               throw friendlyFsError(fsErr, {
                 operation: `Writing asset`,
                 path: diskPath,
-                hint: `Sync can't continue until outDir (${config.outDir}) is writable.`,
+                hint: sourceByKey.has(entry.key)
+                  ? 'Sync can\'t continue until the original game file is writable.'
+                  : `Sync can't continue until outDir (${config.outDir}) is writable.`,
               });
             }
             if (existedBefore) result.modified.push(entry.key);
@@ -800,7 +851,9 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   // written, so importer settings the user tweaked in Unity are preserved.
   if (projectKind === 'Unity') {
     const meta = await writeMissingUnityMetas(
-      manifest.map((entry) => ({ id: entry.id, pngPath: pathFor(entry) })),
+      manifest
+        .filter((entry) => !sourceByKey.has(entry.key))
+        .map((entry) => ({ id: entry.id, pngPath: pathFor(entry) })),
       config.unityPpu ?? DEFAULT_UNITY_PPU,
     );
     if (verbose && meta.written > 0) {
@@ -819,15 +872,16 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
 
   // Prune (now default — pass --no-prune to opt out).
   if (shouldPrune && orphans.length > 0) {
-    const outRoot = resolve(process.cwd(), config.outDir);
+    const pruneRoot = resolve(process.cwd(), config.outDir);
     for (const p of orphans) {
-      assertPathInsideRoot(p, outRoot, 'outDir');
+      if (!isPathInside(p, pruneRoot)) continue;
+      assertPathInsideRoot(p, pruneRoot, 'outDir');
       try {
         await unlink(p);
         // Unity sidecar follows its PNG — a stranded .meta shows up in Unity
         // as a missing-asset warning.
         await unlink(`${p}.meta`).catch(() => {});
-        const relPath = relative(outRoot, p).replace(/\\/g, '/');
+        const relPath = relative(pruneRoot, p).replace(/\\/g, '/');
         const key = relPath.endsWith('.png') ? relPath.slice(0, -4) : relPath;
         result.removed.push(key);
         if (verbose) console.log(`  ${kleur.red('-')} ${relative(process.cwd(), p)}`);
@@ -891,17 +945,25 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   // without re-fetching the manifest. Renamed/pruned keys are dropped so a
   // stale entry can never send an edit to the wrong artboard.
   const nextSynced: Record<string, SyncedSprite> = { ...(state.synced ?? {}) };
-  for (const r of renamed) delete nextSynced[r.oldKey];
+  for (const r of renamed) {
+    delete nextSynced[r.oldKey];
+  }
   for (const key of result.removed) delete nextSynced[key];
+  const writtenKeys = new Set([...result.added, ...result.modified]);
   for (const entry of manifest) {
     if (!entry.asset_id) continue;
     const sha = entry.sha256 ?? (await fileSha256(pathFor(entry)));
     if (!sha) continue;
+    const prev = nextSynced[entry.key];
+    const diskSha256 = writtenKeys.has(entry.key)
+      ? sha
+      : (shaByEntryId.get(entry.id) ?? prev?.diskSha256 ?? sha);
+    const sourceRel = sourceByKey.get(entry.key);
     // Legacy single-PNG rows have no artboard address (`layer_idx: -1`). Record
     // them anyway, flagged, so `push` skips them with a hint instead of
     // adopting the same art as a second document.
     if (typeof entry.layer_idx !== 'number' || entry.layer_idx < 0) {
-      nextSynced[entry.key] = { assetId: entry.asset_id, layerIdx: 0, sha256: sha, legacy: true };
+      nextSynced[entry.key] = { assetId: entry.asset_id, layerIdx: 0, sha256: sha, diskSha256, legacy: true, ...(sourceRel ? { sourceRel } : {}) };
       continue;
     }
     nextSynced[entry.key] = {
@@ -909,7 +971,9 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
 
       layerIdx: entry.layer_idx,
       sha256: sha,
+      diskSha256,
       ...(typeof entry.layer_count === 'number' ? { layers: entry.layer_count } : {}),
+      ...(sourceRel ? { sourceRel } : {}),
     };
   }
   const nextState: SyncState = { ...state, assets: nextAssets, synced: nextSynced };
@@ -990,22 +1054,27 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     if (renamed.length > 0) printRenames(renamed, { withHints: true });
   }
 
-  await maybePushLocalSprites(config.push, verbose);
+  await maybePushLocalSprites(config.push, verbose, gameIndex);
 
   if (result.failed) process.exitCode = 1;
   return result;
 }
 
-async function maybePushLocalSprites(pushEnabled: boolean | undefined, verbose: boolean): Promise<void> {
-  if (pushEnabled === false) return;
+async function maybePushLocalSprites(
+  pushEnabled: boolean | undefined,
+  verbose: boolean,
+  gameIndex?: GameIndex,
+): Promise<PushSummary | null> {
+  if (pushEnabled === false) return null;
   try {
-    await runPush({ quiet: !verbose });
+    return await runPush({ quiet: !verbose, gameIndex });
   } catch (e) {
     if (verbose) {
       console.log();
-      console.log(kleur.yellow(`! could not import local sprites into MagicPixel: ${(e as Error).message}`));
+      console.log(kleur.yellow(`! could not push working-set sprites into MagicPixel: ${(e as Error).message}`));
       console.log(kleur.dim(`  Fix: run \`${cmd('push')}\` once the connection is healthy.`));
     }
+    return null;
   }
 }
 

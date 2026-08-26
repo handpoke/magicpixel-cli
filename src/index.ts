@@ -14,6 +14,8 @@ import { logoutCommand } from './commands/logout.js';
 import { doctorCommand } from './commands/doctor.js';
 import { repairCommand } from './commands/repair.js';
 import { startCommand } from './commands/start.js';
+import { connectCommand } from './commands/connect.js';
+import { searchCommand } from './commands/search.js';
 import { parseWatchInterval, parseConcurrency } from './util/flagValidators.js';
 import { CLI_VERSION } from './version.js';
 
@@ -111,6 +113,18 @@ program
   .option('--flatten', 'Allow replacing multi-layer artboards with the flat local image')
   .addHelpText('after', '\nExamples:\n  $ magicpixel push --dry-run      # see what changed on disk\n  $ magicpixel push                # send local edits + new sprites\n')
   .action(wrap("push", async (opts) => pushCommand(opts as Parameters<typeof pushCommand>[0])));
+
+program
+  .command('connect <glob>')
+  .description('Add a game-sprite glob to the working set and ingest matching PNGs')
+  .addHelpText('after', '\nExamples:\n  $ magicpixel connect \'assets/Sprites/Hero/**\'\n  $ magicpixel connect Runtime/UI/hud.png\n')
+  .action(wrap("connect", async (glob: string) => connectCommand(glob)));
+
+program
+  .command('search <query>')
+  .description('Search indexed game PNGs (no network)')
+  .addHelpText('after', '\nExamples:\n  $ magicpixel search hero\n')
+  .action(wrap("search", async (query: string) => searchCommand(query)));
 
 
 program

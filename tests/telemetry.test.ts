@@ -99,7 +99,7 @@ describe('reportCliError', () => {
     await reportCliError(
       new Error('boom'),
       { command: 'sync' },
-      { outDir: 'x', include: ['**/*'], exclude: [], endpoint: 'https://my-proxy.example.com/integration-assets', emitIndex: true },
+      { outDir: 'x', include: ['**/*'], exclude: [], connect: [], endpoint: 'https://my-proxy.example.com/integration-assets', emitIndex: true },
     );
     expect(fetchMock).not.toHaveBeenCalled();
   });

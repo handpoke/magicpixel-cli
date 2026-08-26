@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { lstat, realpath } from 'node:fs/promises';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 
 /** Max PNG payload per asset (64 MiB). */
 export const MAX_ASSET_BYTES = 64 * 1024 * 1024;
@@ -151,11 +152,104 @@ export async function readBodyWithLimit(res: Response, maxBytes: number): Promis
 /** Max length of a user-supplied picomatch glob; shared with config.ts. */
 export const MAX_GLOB_LEN = 256;
 
+/** Max cwd-relative game PNG path persisted or written back. */
+export const MAX_SOURCE_REL = 512;
+
+/**
+ * Game write-back path must be a relative PNG with no `..` / empty / absolute
+ * segments. Rejects `Assets/../package.json`-style tricks that `resolve()`
+ * would otherwise normalize back inside the project.
+ */
+export function sanitizeSourceRel(rel: string | undefined | null): string | null {
+  if (!rel || typeof rel !== 'string') return null;
+  const g = rel.trim().replace(/\\/g, '/').replace(/^\.\//, '');
+  if (!g || g.includes('\0') || g.length > MAX_SOURCE_REL) return null;
+  if (isAbsolute(g) || /^[a-zA-Z]:/.test(g)) return null;
+  const parts = g.split('/');
+  if (parts.some((s) => s === '' || s === '.' || s === '..')) return null;
+  if (!g.toLowerCase().endsWith('.png')) return null;
+  return g;
+}
+
+/**
+ * Refuse to read or write through a symlink (or a parent symlink that
+ * realpath-escapes the project). Closes the window where a `.png` is swapped
+ * for a link after the index walk skipped `isSymbolicLink()`.
+ */
+export async function assertSafeIoPath(
+  targetPath: string,
+  rootDir: string,
+  opts: { label?: string; forWrite?: boolean } = {},
+): Promise<void> {
+  const label = opts.label ?? 'project';
+  const verb = opts.forWrite ? 'write' : 'read';
+  const root = resolve(rootDir);
+  const target = resolve(targetPath);
+  assertPathInsideRoot(target, root, label);
+  // Compare symlink-resolved paths against the real project root. On macOS
+  // `tmpdir()` is `/var/folders` → `/private/var/folders`; lexical `resolve`
+  // alone would reject a realpath that is still the same directory.
+  let rootReal = root;
+  try {
+    rootReal = await realpath(root);
+  } catch {
+    // Root missing — lexical check above already ran.
+  }
+
+  let st;
+  try {
+    st = await lstat(target);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+    st = null;
+  }
+
+  if (st) {
+    if (st.isSymbolicLink()) {
+      throw new Error(
+        `refusing to ${verb} through a symlink (${relative(process.cwd(), target) || target}).\n` +
+          `  Fix: replace the symlink with a regular .png inside the project.`,
+      );
+    }
+    if (!st.isFile()) {
+      throw new Error(
+        `refusing to ${verb} a non-file (${relative(process.cwd(), target) || target}).`,
+      );
+    }
+    const real = await realpath(target);
+    assertPathInsideRoot(real, rootReal, label);
+    return;
+  }
+
+  let dir = dirname(target);
+  while (true) {
+    try {
+      const realDir = await realpath(dir);
+      const rest = relative(dir, target);
+      if (rest === '' || rest.startsWith('..') || isAbsolute(rest)) {
+        throw new Error(`refusing to ${verb} outside ${label}.`);
+      }
+      assertPathInsideRoot(resolve(realDir, rest), rootReal, label);
+      return;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      const parent = dirname(dir);
+      if (parent === dir) {
+        throw new Error(`refusing to ${verb}: could not resolve parent of ${target}.`);
+      }
+      dir = parent;
+    }
+  }
+}
+
 /** Validate a user-supplied picomatch glob from the CLI. */
 export function assertSafeGlob(glob: string): string {
   const g = glob.trim();
   if (!g || g.length > MAX_GLOB_LEN || g.includes('\0')) {
     throw new Error(`invalid glob pattern (empty, too long, or contains null bytes).`);
+  }
+  if (g.split(/[/\\]/).some((seg) => seg === '..')) {
+    throw new Error(`invalid glob pattern (must not contain "..").`);
   }
   return g;
 }

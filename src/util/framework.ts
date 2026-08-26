@@ -1,6 +1,6 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { relative, resolve } from 'node:path';
 
 export type ProjectKind =
   | 'Next.js'
@@ -50,9 +50,57 @@ async function detectJsKind(cwd: string): Promise<ProjectKind> {
   }
 }
 
+/**
+ * Case-insensitive child lookup, preserving the on-disk name. `existsSync` of
+ * a guessed `Assets` path is wrong on macOS (matches `assets` but keeps the
+ * wrong casing).
+ */
+export function resolveChild(
+  cwd: string,
+  logicalName: string,
+  opts: { directory?: boolean } = {},
+): string | null {
+  try {
+    const want = logicalName.toLowerCase();
+    for (const ent of readdirSync(cwd, { withFileTypes: true })) {
+      if (ent.name.toLowerCase() !== want) continue;
+      if (opts.directory && !ent.isDirectory()) continue;
+      return resolve(cwd, ent.name);
+    }
+  } catch {
+    /* unreadable cwd */
+  }
+  return null;
+}
+
+/** Case-insensitive child directory, preserving the on-disk name. */
+export function resolveChildDir(cwd: string, logicalName: string): string | null {
+  return resolveChild(cwd, logicalName, { directory: true });
+}
+
+function hasMetaSidecar(dir: string): boolean {
+  try {
+    return readdirSync(dir).some((name) => name.endsWith('.meta'));
+  } catch {
+    return false;
+  }
+}
+
 function detectEngineKind(cwd: string): ProjectKind {
   if (existsSync(resolve(cwd, 'project.godot'))) return 'Godot';
-  if (existsSync(resolve(cwd, 'ProjectSettings', 'ProjectVersion.txt'))) return 'Unity';
+  const projectSettings = resolveChildDir(cwd, 'ProjectSettings');
+  if (projectSettings && resolveChild(projectSettings, 'ProjectVersion.txt')) return 'Unity';
+  const packages = resolveChildDir(cwd, 'Packages');
+  if (packages && resolveChild(packages, 'manifest.json')) return 'Unity';
+  // Assets/assets only counts with Unity .meta sidecars — a generic `assets/`
+  // folder in a Node repo is not a Unity project.
+  const assets = resolveChildDir(cwd, 'Assets');
+  if (assets && hasMetaSidecar(assets)) return 'Unity';
+  // Embedded UPM package: Editor/Runtime plus root .meta (kr-core has no
+  // ProjectSettings and often only a lowercase `assets` dump).
+  if (hasMetaSidecar(cwd) && (resolveChildDir(cwd, 'Editor') || resolveChildDir(cwd, 'Runtime'))) {
+    return 'Unity';
+  }
   try {
     const yyp = readdirSync(cwd).find((name) => name.endsWith('.yyp'));
     if (yyp) return 'GameMaker';
@@ -89,16 +137,22 @@ export function suggestOutDir(kind: ProjectKind, cwd: string = process.cwd()): s
     case 'TanStack Start':
       return 'src/assets/magicpixel';
     case 'Unity':
-      return 'Assets/MagicPixel';
+      return suggestEngineOutDir(cwd, 'Assets', 'MagicPixel');
     case 'Godot':
-      return 'assets/magicpixel';
+      return suggestEngineOutDir(cwd, 'assets', 'magicpixel');
     case 'GameMaker':
-      return 'datafiles/magicpixel';
+      return suggestEngineOutDir(cwd, 'datafiles', 'magicpixel');
     default:
       // No kind detected — prefer src/ if present so the typed index is
       // importable; otherwise fall back to a top-level assets/ dir.
       return existsSync(resolve(cwd, 'src')) ? 'src/assets/magicpixel' : 'assets/magicpixel';
   }
+}
+
+function suggestEngineOutDir(cwd: string, folder: string, destName: string): string {
+  const found = resolveChildDir(cwd, folder);
+  const rel = found ? relative(cwd, found).replace(/\\/g, '/') : folder;
+  return `${rel || folder}/${destName}`;
 }
 
 export function hasPackageJson(cwd: string = process.cwd()): boolean {

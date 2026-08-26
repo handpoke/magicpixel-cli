@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.9] — 2026-08-26
+
+### Security
+
+- **Write-back ignores tampered `state.json`.** Sync/push resolve game paths
+  from the live connect index only. `sourceRel` must be a relative `.png`
+  with no `..` / absolute segments; connect globs cannot contain `..`. Pull
+  and push refuse to follow symlinks, and prune still cannot delete files
+  outside `outDir`. Cloud composite keys that still point at an indexed PNG
+  are aliased onto that file so a slug collision does not write a second copy
+  under `outDir` or re-adopt a duplicate.
+
+### Changed
+
+- **Working-set ingest cap is 10,000** (same as the game index), up from 500.
+  Hitting the cap now prints the real match count (`1847 PNGs match — ingesting
+  the first 10000`) on `connect`, `push`, and one-shot `sync`.
+
+- **Push skips unchanged game files.** Ingest's cloud composite sha is not the
+  original PNG. `connect` / `push` / `sync --watch` remember the on-disk sha256
+  (and mtime/size) and skip re-uploading until the game file actually changes —
+  so a second `connect '**'` resumes leftover files instead of rewriting the
+  whole working set. Hashing is parallel and cached by mtime+size. The game-tree
+  walk reads directories in parallel.
+
+- **Working set instead of bulk import.** `start` / `sync` / `push` no longer
+  copy every game PNG into the MagicPixel library. The CLI indexes sprites
+  locally; `magicpixel search <query>` finds them and `magicpixel connect
+  '<glob>'` adds a working set (`connect` in `magicpixel.json`). Sync writes
+  those sprites back to the original game path. New MagicPixel-only art still
+  lands in `outDir`.
+
+### Fixed
+
+- **First-run import survived a 546.** A persistent manifest-worker recycle
+  used to abort `start` / `sync` before local sprites were pushed. Pull still
+  retries 546s for ~30s; if it still fails, `push` runs anyway (ingest is a
+  different host) and `start` still prints watch instructions.
+
+- **Unity folders appear under Connected.** Game-tree PNGs in the working set
+  adopt as folder/doc/artboard (`sprites/hero/hero`) so they land in Connected,
+  not Files. Reused library folders get the Sync to Unity flag. Adopting an
+  artboard that already matches on disk is a no-op instead of a wall of
+  `cloud-changed` conflicts.
+
+- **Unity packages and hidden folders.** `start` treated a UPM package
+  (`Editor`/`Runtime`/`assets`, `.meta` files, no `package.json`) as "not a
+  project" and asked for JavaScript. Those layouts detect as Unity. The game
+  index walks the whole package (not only `Assets/`), including hidden content
+  dirs like `.SpineRaw_*`, and uses the on-disk `assets`/`Assets` casing for
+  `outDir`. `.git` / `.magicpixel` / Library / Packages / nested `MagicPixel`
+  folders stay skipped. A generic Node `assets/` folder without Unity `.meta`
+  files is not treated as a Unity project.
+
 ## [0.5.8] — 2026-08-26
 
 ### Added

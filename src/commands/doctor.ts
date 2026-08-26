@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve, relative } from 'node:path';
 import { loadConfig, loadState, resolveEndpoint, defaultConfig, type MagicPixelConfig } from '../config.js';
 import { describeKeySource, readKeyForDisplay } from '../util/credentials.js';
-import { detectProjectKind, hasPackageJson } from '../util/framework.js';
+import { detectProjectKind, hasPackageJson, isEngineKind, type ProjectKind } from '../util/framework.js';
 import { safeFetch } from '../util/security.js';
 import { authHeaders } from '../util/authHeaders.js';
 import { CLI_VERSION } from '../version.js';
@@ -20,10 +20,10 @@ export interface DoctorReport {
   node: string;
   platform: NodeJS.Platform;
   cwd: string;
-  framework: string | null;
+  framework: ProjectKind;
   hasPackageJson: boolean;
   config:
-    | { found: true; outDir: string; emitIndex: boolean; include: string[]; exclude: string[]; endpoint: string | null }
+    | { found: true; outDir: string; emitIndex: boolean; include: string[]; exclude: string[]; connect: string[]; endpoint: string | null }
     | { found: false; error: string };
   endpoint: string;
   key: { source: 'env' | 'credentials-file' | 'none' };
@@ -155,6 +155,7 @@ export async function collectDoctorReport(opts: DoctorOpts = {}): Promise<Doctor
           emitIndex: config.emitIndex !== false,
           include: config.include,
           exclude: config.exclude,
+          connect: config.connect,
           endpoint: config.endpoint ?? null,
         }
       : { found: false, error: configErr ?? 'unknown' },
@@ -240,7 +241,12 @@ export function renderDoctorReport(r: DoctorReport): string {
   push(`Platform:           ${r.platform}`);
   push(`cwd:                ${r.cwd}`);
   push();
-  push(`package.json:       ${r.hasPackageJson ? 'found' : kleur.yellow('missing')}`);
+  const pkgMissing = r.hasPackageJson
+    ? 'found'
+    : isEngineKind(r.framework)
+      ? kleur.dim('n/a (engine)')
+      : kleur.yellow('missing');
+  push(`package.json:       ${pkgMissing}`);
   push(`Framework detected: ${r.framework ?? kleur.dim('none')}`);
 
   if (r.config.found) {
@@ -248,6 +254,7 @@ export function renderDoctorReport(r: DoctorReport): string {
     push(`  outDir:           ${r.config.outDir}`);
     push(`  emitIndex:        ${r.config.emitIndex ? 'true' : 'false'}`);
     push(`  include:          ${r.config.include.join(', ')}`);
+    if (r.config.connect.length) push(`  connect:          ${r.config.connect.join(', ')}`);
     if (r.config.exclude.length) push(`  exclude:          ${r.config.exclude.join(', ')}`);
     if (r.config.endpoint) push(`  endpoint:         ${kleur.yellow(r.config.endpoint)} (custom)`);
   } else {

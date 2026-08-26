@@ -55,6 +55,37 @@ describe('detectProjectKind', () => {
     expect(suggestOutDir('Unity', d)).toBe('Assets/MagicPixel');
   });
 
+  it('detects Unity from a lowercase assets folder with .meta sidecars', async () => {
+    const d = tmp();
+    mkdirSync(join(d, 'assets', 'Sprites'), { recursive: true });
+    writeFileSync(join(d, 'assets', 'Sprites.meta'), 'fileFormatVersion: 2\n');
+    expect(await detectProjectKind(d)).toBe('Unity');
+    expect(suggestOutDir('Unity', d)).toBe('assets/MagicPixel');
+  });
+
+  it('does not treat a generic assets/ folder as Unity', async () => {
+    const d = tmp();
+    mkdirSync(join(d, 'assets', 'images'), { recursive: true });
+    writeFileSync(join(d, 'package.json'), JSON.stringify({ name: 'tools', private: true }));
+    expect(await detectProjectKind(d)).toBeNull();
+  });
+
+  it('detects a Unity UPM package (Editor/Runtime + .meta, no ProjectSettings)', async () => {
+    const d = tmp();
+    mkdirSync(join(d, 'Editor'), { recursive: true });
+    mkdirSync(join(d, 'Runtime'), { recursive: true });
+    writeFileSync(join(d, 'package.json.meta'), 'fileFormatVersion: 2\n');
+    expect(await detectProjectKind(d)).toBe('Unity');
+    expect(suggestOutDir('Unity', d)).toBe('Assets/MagicPixel');
+  });
+
+  it('detects Unity from Packages/manifest.json', async () => {
+    const d = tmp();
+    mkdirSync(join(d, 'Packages'), { recursive: true });
+    writeFileSync(join(d, 'Packages', 'manifest.json'), '{"dependencies":{}}');
+    expect(await detectProjectKind(d)).toBe('Unity');
+  });
+
   it('detects GameMaker from a root *.yyp file', async () => {
     const d = tmp();
     writeFileSync(join(d, 'Foo.yyp'), '{}');
