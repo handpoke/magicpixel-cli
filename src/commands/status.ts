@@ -5,6 +5,7 @@ import { fileSha256 } from '../util/hash.js';
 import { assetDiskPath } from '../util/paths.js';
 import { readKeyForDisplay } from '../util/credentials.js';
 import { createLimit } from '../util/limit.js';
+import { cmd } from '../util/invoke.js';
 
 export async function statusCommand(): Promise<void> {
   // Config is optional — a brand-new user can `magicpixel status` to inspect
@@ -25,7 +26,7 @@ export async function statusCommand(): Promise<void> {
     console.log(`  endpoint: ${resolveEndpoint(config)}`);
   } else {
     console.log(kleur.yellow(`  magicpixel.json: ${configErr ?? 'missing'}`));
-    console.log(kleur.dim(`  Run \`npx magicpixel init\` to create one.`));
+    console.log(kleur.dim(`  Run \`${cmd('start')}\` to create one.`));
   }
   console.log();
 
@@ -41,7 +42,7 @@ export async function statusCommand(): Promise<void> {
   // env var and falsely reported "key not set" for logged-in users.
   const stored = readKeyForDisplay();
   if (!stored) {
-    console.log(kleur.red('  no API key — run `magicpixel login` or set MAGICPIXEL_API_KEY'));
+    console.log(kleur.red(`  no API key — run \`${cmd('login')}\` or set MAGICPIXEL_API_KEY`));
     return;
   }
   const sourceLabel = stored.source === 'env' ? 'env (MAGICPIXEL_API_KEY)' : 'file (.magicpixel/credentials)';

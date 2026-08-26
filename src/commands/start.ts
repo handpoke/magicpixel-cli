@@ -11,6 +11,7 @@ import { findKeyInDotenv, readCredentialsSync, writeCredentials } from '../util/
 import { initCommand } from './init.js';
 import { loginCommand } from './login.js';
 import { syncCommand } from './sync.js';
+import { cmd } from '../util/invoke.js';
 
 interface StartOpts {
   force?: boolean;
@@ -19,7 +20,7 @@ interface StartOpts {
 /**
  * One-command bootstrap for new users. Runs init → key prompt → first sync →
  * prints copy-pasteable watch instructions. Designed so a non-technical user
- * can paste `npx magicpixel start` and end up with sprites on disk and a watch
+ * can paste `npx @magicpixelart/cli start` and end up with sprites on disk and a watch
  * script ready to run.
  */
 export async function startCommand(opts: StartOpts = {}): Promise<void> {
@@ -33,8 +34,8 @@ export async function startCommand(opts: StartOpts = {}): Promise<void> {
     if (isEngineKind(kind)) {
       console.log(
         kleur.yellow(
-          `  Detected ${kind}. \`magicpixel start\` is JS-only; run ` +
-            '`npx magicpixel init && npx magicpixel login && npx magicpixel sync --watch` instead.',
+          `  Detected ${kind}. \`${cmd('start')}\` is JS-only; run ` +
+            `\`${cmd('init')} && ${cmd('login')} && ${cmd('sync')} --watch\` instead.`,
         ),
       );
       return;
@@ -60,7 +61,7 @@ export async function startCommand(opts: StartOpts = {}): Promise<void> {
       const msg = (e as Error).message ?? String(e);
       console.log(kleur.yellow(`  Existing magicpixel.json is invalid:`));
       for (const line of msg.split('\n')) console.log(kleur.yellow(`    ${line}`));
-      console.log(kleur.dim('  Re-run `npx magicpixel start --force` to overwrite it, or fix the file by hand.'));
+      console.log(kleur.dim(`  Re-run \`${cmd('start')} --force\` to overwrite it, or fix the file by hand.`));
       return;
     }
   } else {
@@ -99,7 +100,7 @@ export async function startCommand(opts: StartOpts = {}): Promise<void> {
   console.log();
   if (firstSyncFailed) {
     console.log(kleur.yellow('! first sync completed with errors.'));
-    console.log(kleur.dim('  Re-run `npx magicpixel sync` to retry the failed downloads, or `npx magicpixel doctor` to diagnose.'));
+    console.log(kleur.dim(`  Re-run \`${cmd('sync')}\` to retry the failed downloads, or \`${cmd('doctor')}\` to diagnose.`));
   } else {
     console.log(kleur.bold('You\'re set up. ✨'));
   }
@@ -108,11 +109,11 @@ export async function startCommand(opts: StartOpts = {}): Promise<void> {
   if (hasWatch) {
     console.log(`  ${kleur.green('▶')} ${kleur.bold('npm run magicpixel:watch')}   ${kleur.dim('# keeps sprites fresh while you edit them in MagicPixel')}`);
   } else {
-    console.log(`  ${kleur.green('▶')} ${kleur.bold('npx magicpixel sync --watch')}   ${kleur.dim('# keeps sprites fresh while you edit them in MagicPixel')}`);
+    console.log(`  ${kleur.green('▶')} ${kleur.bold(`${cmd('sync')} --watch`)}   ${kleur.dim('# keeps sprites fresh while you edit them in MagicPixel')}`);
   }
   console.log();
   if (await hasDevScript()) {
-    const watchCmd = hasWatch ? 'npm run magicpixel:watch' : 'npx magicpixel sync --watch';
+    const watchCmd = hasWatch ? 'npm run magicpixel:watch' : `${cmd('sync')} --watch`;
     console.log(kleur.dim('  Tip: run your dev server and the watcher together with'));
     console.log(kleur.dim(`       \`npx concurrently "npm run dev" "${watchCmd}"\``));
     console.log();

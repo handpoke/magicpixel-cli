@@ -9,6 +9,7 @@ import { loadConfig, statePath, getApiKey } from '../config.js';
 import { assertKeyValid } from '../util/auth.js';
 import { listEmptyDirs, pruneEmptyDirs } from '../util/paths.js';
 import { syncCommand } from './sync.js';
+import { cmd } from '../util/invoke.js';
 
 interface RepairOpts {
   dryRun?: boolean;
@@ -17,7 +18,7 @@ interface RepairOpts {
 
 /**
  * One-shot self-healing command. Runs the standard "turn it off and on
- * again" recovery sequence so support can say "run `npx magicpixel repair`":
+ * again" recovery sequence so support can say "run `npx @magicpixelart/cli repair`":
  *
  *   1. Validate the stored API key.
  *   2. Quarantine `state.json` so the next sync re-derives everything.
@@ -120,7 +121,7 @@ export async function repairCommand(opts: RepairOpts = {}): Promise<void> {
     console.log(kleur.dim('     (state was not reset — this will run a normal full sync, not a recovery)'));
   }
   if (opts.dryRun) {
-    console.log(`     ${kleur.dim('would run `magicpixel sync --full` (skipped in --dry-run)')}`);
+    console.log(`     ${kleur.dim(`would run \`${cmd('sync')} --full\` (skipped in --dry-run)`)}`);
     console.log();
     if (skippedStep2) {
       console.log(kleur.yellow('! repair plan would skip the state reset. Re-run with --yes to apply it.'));
@@ -140,7 +141,7 @@ export async function repairCommand(opts: RepairOpts = {}): Promise<void> {
   console.log();
   if ((process.exitCode ?? 0) > exitBefore) {
     console.log(
-      kleur.yellow('! repair completed with errors — re-run `magicpixel sync` to retry the failed downloads.'),
+      kleur.yellow(`! repair completed with errors — re-run \`${cmd('sync')}\` to retry the failed downloads.`),
     );
   } else {
     console.log(kleur.green('✓ repair complete.'));

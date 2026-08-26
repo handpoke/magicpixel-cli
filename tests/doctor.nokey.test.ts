@@ -45,7 +45,7 @@ describe('doctor with no API key', () => {
     expect(report.network).toEqual({ skipped: 'no-api-key' });
     // The "run login" suggestion is present exactly once; the misleading
     // "API rejected the key" one must NOT appear.
-    expect(report.suggestions.some((s) => /magicpixel login/.test(s))).toBe(true);
+    expect(report.suggestions.some((s) => /magicpixel(art\/cli)? login/.test(s))).toBe(true);
     expect(report.suggestions.some((s) => /API rejected the key/.test(s))).toBe(false);
     fetchSpy.mockRestore();
   });

@@ -19,7 +19,7 @@ Requires Node.js ≥ 18.
 One command, inside your project folder (the one with `package.json`):
 
 ```bash
-npx magicpixel start
+npx @magicpixelart/cli start
 ```
 
 That walks you through everything: detects your framework, writes `magicpixel.json`, prompts for your API key (paste it from [magicpixel.art/settings](https://magicpixel.art/settings) → API Keys), pulls your sprites, and tells you how to keep them fresh.
@@ -42,16 +42,16 @@ If `start` finds a `MAGICPIXEL_API_KEY` in your `.env` / `.env.local`, it offers
 ### Manual setup (advanced)
 
 ```bash
-npx magicpixel init           # writes magicpixel.json
-npx magicpixel login          # stores your key (or: export MAGICPIXEL_API_KEY=mp_live_...)
-npx magicpixel sync           # downloads changed assets
-npx magicpixel sync --watch   # keeps assets fresh while you work
+npx @magicpixelart/cli init           # writes magicpixel.json
+npx @magicpixelart/cli login          # stores your key (or: export MAGICPIXEL_API_KEY=mp_live_...)
+npx @magicpixelart/cli sync           # downloads changed assets
+npx @magicpixelart/cli sync --watch   # keeps assets fresh while you work
 ```
 
 ### Something not working?
 
 ```bash
-npx magicpixel doctor
+npx @magicpixelart/cli doctor
 ```
 
 Prints a one-screen diagnostic (CLI version, framework, outDir, key source, last sync, last error, live manifest probe). Paste it to your AI agent — it's designed to be the only context they need.
@@ -101,6 +101,7 @@ No bundler config, no runtime, no extra package.
 | `doctor` | Print a one-screen diagnostic — paste it to your AI agent when something breaks. |
 | `repair [--dry-run] [-y]` | Self-heal a broken sync: validate key → quarantine `state.json` → prune empty dirs → full re-sync. |
 | `sync [...flags]` | Fetch manifest, diff against disk, download changed assets, prune orphans. |
+| `push [--dry-run] [--flatten]` | Upload local PNG edits (and new sprites) back to MagicPixel. |
 | `add <glob>` / `remove <glob>` | Manage `include` patterns. |
 | `list` | Print matching manifest as a table. |
 | `status` | Config, last sync, diff vs remote. |
@@ -135,6 +136,8 @@ Sync is built to be cheap: a no-op run is one small manifest request, zero PNG b
 | `include`  | `string[]` | `["**/*"]`              | Globs (picomatch) matched against `folder/slug`. |
 | `exclude`  | `string[]` | `[]`                    | Globs to exclude.                                |
 | `emitIndex`| `boolean`  | `true`                  | Emit `<outDir>/index.ts` with typed asset map.   |
+| `unityPpu` | `number?`  | `32`                    | Unity only: pixels-per-unit in generated `.meta`. |
+| `unitySyncAll` | `boolean?` | `false`             | Unity only: sync every artboard, not just those flagged in the editor. |
 | `endpoint` | `string?`  | production URL          | Override the API base (testing only). Must be **HTTPS**. |
 
 State (`.magicpixel/state.json`) tracks `lastSync` (file mode `0600`). Add `.magicpixel/` to `.gitignore` (init offers to do this).

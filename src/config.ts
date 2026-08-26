@@ -5,6 +5,7 @@ import { assertSafeOutDir, MAX_GLOB_LEN, validateEndpointUrl } from './util/secu
 import { readCredentialsSync } from './util/credentials.js';
 import { friendlyFsError } from './util/errors.js';
 import { atomicWrite } from './util/atomicWrite.js';
+import { cmd } from './util/invoke.js';
 
 const CONFIG_FILENAME = 'magicpixel.json';
 const STATE_DIR = '.magicpixel';
@@ -20,15 +21,46 @@ export interface MagicPixelConfig {
   endpoint?: string;
   /** Emit a typed `index.ts` alongside the PNGs (autocomplete + compile-time key checks). */
   emitIndex?: boolean;
+  /** Unity only: pixels-per-unit baked into generated `.meta` files (default 32). */
+  unityPpu?: number;
+  /** Unity only: sync every artboard instead of only the ones flagged
+   *  "Sync to Unity" in the editor (default false). */
+  unitySyncAll?: boolean;
 }
+
+
+/**
+ * What the CLI last pulled for one composite key. `magicpixel push` needs the
+ * exact artboard address plus the composite sha it wrote to disk, so a disk
+ * edit can be sent back with a conflict baseline instead of blindly
+ * overwriting whatever the cloud holds now.
+ */
+export interface SyncedSprite {
+  assetId: string;
+  layerIdx: number;
+  /** Composite sha256 the CLI last wrote to disk for this key. */
+  sha256: string;
+  /** Layer count of the artboard — a >1 push needs an explicit `--flatten`. */
+  layers?: number;
+  /**
+   * Legacy single-PNG row (`layer_idx: -1` in the manifest): the cloud has no
+   * addressable artboard for it, so `push` refuses instead of adopting a
+   * duplicate document.
+   */
+  legacy?: boolean;
+}
+
 
 export interface SyncState {
   lastSync?: string;
   /** Map of manifest asset id → key, captured at the end of each successful sync.
    *  Used for rename detection and for emitting `MagicPixelAssetsById` in `index.ts`. */
   assets?: Record<string, string>;
+  /** Map of composite key → artboard address + last-pulled sha (for `push`). */
+  synced?: Record<string, SyncedSprite>;
   /** Last error message surfaced by `sync` (for `magicpixel doctor`). Cleared on a clean run. */
   lastError?: string;
+
 }
 
 export const defaultConfig: MagicPixelConfig = {
@@ -51,7 +83,7 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<MagicPixe
   if (!existsSync(path)) {
     throw new Error(
       `No ${CONFIG_FILENAME} found in ${cwd}.\n` +
-        `  Fix: run \`npx magicpixel init\` to create one.`,
+        `  Fix: run \`${cmd('start')}\` — it creates the config, logs you in, and runs the first sync.`,
     );
   }
   const raw = await readFile(path, 'utf8');
@@ -101,14 +133,33 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<MagicPixe
     emitIndex = parsed.emitIndex;
   }
 
+  let unityPpu: number | undefined;
+  if (parsed.unityPpu !== undefined) {
+    if (
+      typeof parsed.unityPpu !== 'number' ||
+      !Number.isFinite(parsed.unityPpu) ||
+      parsed.unityPpu <= 0 ||
+      parsed.unityPpu > 4096
+    ) {
+      throw new Error(
+        `${CONFIG_FILENAME}: "unityPpu" must be a number between 1 and 4096.\n` +
+          `  Fix: set "unityPpu": 32 (or remove the field to use the default).`,
+      );
+    }
+    unityPpu = Math.round(parsed.unityPpu);
+  }
+
   return {
     outDir,
     include,
     exclude,
     endpoint,
     emitIndex,
+    unityPpu,
+    unitySyncAll: parsed.unitySyncAll === true ? true : undefined,
   };
 }
+
 
 const MAX_GLOBS = 64;
 
@@ -160,7 +211,7 @@ export async function saveConfig(
     throw friendlyFsError(e, {
       operation: 'Saving magicpixel.json',
       path,
-      hint: 'magicpixel.json holds your sync config — without it `magicpixel sync` can\'t run.',
+      hint: `magicpixel.json holds your sync config — without it \`${cmd('sync')}\` can't run.`,
     });
   }
 }
@@ -248,7 +299,7 @@ export function getApiKey(): string {
       'No MagicPixel API key found.\n' +
         '  Fix:\n' +
         '    1. Get a key at https://magicpixel.art/settings (API Keys).\n' +
-        '    2. Run `magicpixel login` (or `export MAGICPIXEL_API_KEY=mp_live_...`).\n' +
+        `    2. Run \`${cmd('login')}\` (or \`export MAGICPIXEL_API_KEY=mp_live_...\`).\n` +
         '    3. Re-run the command.',
     );
   }
@@ -265,7 +316,7 @@ export function getApiKey(): string {
   if (!/^mp_(live|test)_[a-f0-9]{64}$/.test(trimmed)) {
     throw new Error(
       `MagicPixel API key does not look right (expected mp_live_… or mp_test_…).\n` +
-        `  Fix: run \`magicpixel login\` and paste a fresh key from https://magicpixel.art/settings.`,
+        `  Fix: run \`${cmd('login')}\` and paste a fresh key from https://magicpixel.art/settings.`,
     );
   }
   return trimmed;

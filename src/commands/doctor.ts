@@ -8,6 +8,7 @@ import { detectProjectKind, hasPackageJson } from '../util/framework.js';
 import { safeFetch } from '../util/security.js';
 import { authHeaders } from '../util/authHeaders.js';
 import { CLI_VERSION } from '../version.js';
+import { cmd } from '../util/invoke.js';
 
 /**
  * Structured diagnostic report. Stable shape — `--json` consumers (and
@@ -123,16 +124,16 @@ export async function collectDoctorReport(opts: DoctorOpts = {}): Promise<Doctor
       : await probeManifest(endpoint);
 
   const suggestions: string[] = [];
-  if (keySource === 'none') suggestions.push('Run `magicpixel login` to store your API key.');
-  if (!config) suggestions.push('Run `magicpixel start` (or `magicpixel init`) to bootstrap.');
+  if (keySource === 'none') suggestions.push(`Run \`${cmd('login')}\` to store your API key.`);
+  if (!config) suggestions.push(`Run \`${cmd('start')}\` (or \`${cmd('init')}\`) to bootstrap.`);
   if (config && !watchScript && pkgFound) {
-    suggestions.push('Add a `magicpixel:watch` npm script (or run `magicpixel sync -w`) for live sync.');
+    suggestions.push(`Add a \`magicpixel:watch\` npm script (or run \`${cmd('sync')} -w\`) for live sync.`);
   }
-  if (state.lastError) suggestions.push('Last sync surfaced an error — run `magicpixel repair` to self-heal.');
+  if (state.lastError) suggestions.push(`Last sync surfaced an error — run \`${cmd('repair')}\` to self-heal.`);
   // Only emit network-derived suggestions when we actually probed.
   if ('ok' in network && !network.ok) {
     if (network.status === 401 || network.status === 403) {
-      suggestions.push('API rejected the key — run `magicpixel login` with a fresh key from settings.');
+      suggestions.push(`API rejected the key — run \`${cmd('login')}\` with a fresh key from settings.`);
     } else if (network.status === null) {
       suggestions.push('Could not reach MagicPixel — check internet/proxy, or re-run with --offline.');
     } else {
@@ -259,7 +260,7 @@ export function renderDoctorReport(r: DoctorReport): string {
       ? 'environment variable (MAGICPIXEL_API_KEY)'
       : r.key.source === 'credentials-file'
         ? '.magicpixel/credentials'
-        : kleur.yellow('none — run `magicpixel login`');
+        : kleur.yellow(`none — run \`${cmd('login')}\``);
   push(`API key source:     ${sourceLabel}`);
   push(`Watch script:       ${r.watchScript ? `"${r.watchScript}"` : kleur.dim('not configured')}`);
 
@@ -276,7 +277,7 @@ export function renderDoctorReport(r: DoctorReport): string {
     const reason =
       r.network.skipped === 'offline'
         ? 'skipped (--offline)'
-        : 'skipped (no API key — run `magicpixel login`)';
+        : `skipped (no API key — run \`${cmd('login')}\`)`;
     push(`Network probe:      ${kleur.dim(reason)}`);
   } else if (r.network.ok) {
     push(`Network probe:      ${kleur.green('✓')} ${r.network.status} in ${r.network.roundtripMs}ms`);

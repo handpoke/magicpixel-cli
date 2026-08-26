@@ -4,8 +4,10 @@ import {
   MAX_ASSET_BYTES,
   readBodyWithLimit,
   safeFetch,
+  validateEndpointUrl,
 } from './util/security.js';
 import { authHeaders } from './util/authHeaders.js';
+import { cmd } from './util/invoke.js';
 
 export interface ManifestEntry {
   id: string;
@@ -23,7 +25,16 @@ export interface ManifestEntry {
    *  to delete stale PNGs left behind after a doc/artboard rename. Optional
    *  for backward compatibility with older edge-function deploys. */
   previous_keys?: string[];
+  /** Per-artboard "Sync to Unity" opt-in. Absent on older edge deploys —
+   *  callers must treat `undefined` as "unknown", not "off". */
+  unity?: boolean;
+  /** Row id + artboard index — the address `push` writes a disk edit back to. */
+  asset_id?: string;
+  layer_idx?: number;
+  /** Layer count of the artboard. Absent on stale caches. */
+  layer_count?: number;
 }
+
 
 export interface ManifestProjectInfo {
   /** UUID of the project the API key is scoped to. */
@@ -89,7 +100,7 @@ function friendly(status: number, body: string, context: string): string {
   if (status === 401 || status === 403) {
     return (
       `${context}: ${status} — API key rejected.\n` +
-      `  Fix: regenerate at https://magicpixel.art/settings and re-run \`magicpixel login\`.`
+      `  Fix: regenerate at https://magicpixel.art/settings and re-run \`${cmd('login')}\`.`
     );
   }
   if (status === 404) {
@@ -356,4 +367,82 @@ export function retryAfterMsFromResponse(res: Response): number {
     return Math.min(Math.max(0, asDate - Date.now()), 60_000);
   }
   return 0;
+}
+
+// ---------- disk → cloud ingest (two-way Unity sync) ------------------------
+
+/** Sprite payload for `POST /api/public/integration/ingest`. */
+export interface PushSprite {
+  key: string;
+  pngBase64: string;
+  diskSha256: string;
+  /** UPDATE form: write back into a known artboard. */
+  assetId?: string;
+  layerIdx?: number;
+  baseSha256?: string | null;
+  flatten?: boolean;
+  /** ADOPT form: [...libraryFolders, docSlug, artboardSlug]. */
+  path?: string[];
+  pathNames?: string[];
+  name?: string;
+}
+
+export type PushStatus = 'created' | 'updated' | 'unchanged' | 'conflict' | 'error';
+
+export interface PushResult {
+  key: string;
+  status: PushStatus;
+  reason?: string;
+  message?: string;
+  assetId?: string;
+  layerIdx?: number;
+  /** Composite sha the cloud now reports — store it as the next baseline. */
+  sha256?: string;
+  /** Adopt only: the key the manifest will use. Differs from the disk key when
+   *  the server's slug/collision handling renamed the document. */
+  cloudKey?: string;
+
+}
+
+/** Max sprites the server accepts per request (mirrors MAX_SPRITES_PER_REQUEST). */
+export const PUSH_BATCH_SIZE = 20;
+
+const DEFAULT_INGEST_ENDPOINT = 'https://magicpixel.art/api/public/integration/ingest';
+
+export function resolveIngestEndpoint(): string {
+  const override = process.env.MAGICPIXEL_INGEST_ENDPOINT?.trim();
+  return override ? validateEndpointUrl(override) : DEFAULT_INGEST_ENDPOINT;
+}
+
+/** Post one batch of sprites. Shares the transient-retry policy with pulls. */
+export async function pushSprites(sprites: PushSprite[]): Promise<PushResult[]> {
+  const url = resolveIngestEndpoint();
+  return retryTransient('push', async () => {
+    const { headers, requestId } = buildHeaders({ 'Content-Type': 'application/json' });
+    const res = await safeFetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ sprites }),
+    });
+    const serverRequestId = res.headers.get('x-request-id') ?? requestId;
+    if (res.ok) {
+      const data = (await res.json()) as { results?: unknown } | null;
+      const results = data && typeof data === 'object' ? (data as { results?: unknown }).results : undefined;
+      if (!Array.isArray(results)) {
+        throw new ApiError(
+          502,
+          withRequestId('push: unexpected server response shape (results missing).', serverRequestId),
+          serverRequestId,
+        );
+      }
+      return results as PushResult[];
+    }
+    const bodyText = await res.text();
+    throw new ApiError(
+      res.status,
+      withRequestId(friendly(res.status, bodyText, 'push'), serverRequestId),
+      serverRequestId,
+      retryAfterMsFromResponse(res),
+    );
+  });
 }

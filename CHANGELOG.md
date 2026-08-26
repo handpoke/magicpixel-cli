@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.7] — 2026-08-26
+
+### Added
+
+- **`magicpixel push`.** Two-way sync: walk `outDir`, hash local PNGs, and
+  upload changed or new sprites back to MagicPixel (`--dry-run`, `--flatten`).
+  Cloud conflicts refuse instead of overwriting; new on-disk files are adopted
+  into the library. Prune no longer deletes pending local sprites.
+- **Unity `.meta` files.** Sync writes TextureImporter `.meta` next to PNGs
+  (point filter, no compression, deterministic GUIDs). `unityPpu` (default 32)
+  and `unitySyncAll` in `magicpixel.json`. By default only artboards flagged
+  "Sync to Unity" in the editor are pulled.
+
+### Fixed
+
+- **`npx magicpixel …` dead end.** `magicpixel` is only the bin name — the
+  published package is `@magicpixelart/cli` — so hints like "run `npx
+  magicpixel init`" 404ed (`'magicpixel@*' is not in this registry`) for anyone
+  driving the CLI purely through `npx @magicpixelart/cli …`. Every user-facing
+  command hint now goes through a single `cmd()` helper that prints the short
+  `magicpixel <cmd>` form only when the package resolves from the project's
+  `node_modules`, and the always-correct `npx @magicpixelart/cli <cmd>` form
+  otherwise.
+- **Missing-config hint points at `start`.** A config-less project is now told
+  to run `start` (init + login + first sync) rather than bare `init`, which left
+  users unauthenticated with nothing on disk. `status` uses the same hint
+  (it previously hardcoded `npx @magicpixelart/cli init`).
+
 ## [0.5.6] — 2026-08-21
 
 ### Changed

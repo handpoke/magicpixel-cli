@@ -3,6 +3,7 @@ import { Command } from 'commander';
 import kleur from 'kleur';
 import { initCommand } from './commands/init.js';
 import { syncCommand } from './commands/sync.js';
+import { pushCommand } from './commands/push.js';
 import { addCommand } from './commands/add.js';
 import { removeCommand } from './commands/remove.js';
 import { listCommand } from './commands/list.js';
@@ -102,6 +103,15 @@ program
   .option('-c, --concurrency <n>', 'Parallel downloads (1–16, default 6)', parseConcurrency)
   .addHelpText('after', '\nExamples:\n  $ magicpixel sync                # incremental sync\n  $ magicpixel sync --full         # ignore lastSync, re-check everything\n  $ magicpixel sync -w             # watch mode (2s; adaptive idle backoff; exit 2 after 5 auth failures)\n')
   .action(wrap("sync", async (opts) => syncCommand(opts as Parameters<typeof syncCommand>[0])));
+
+program
+  .command('push')
+  .description('Upload local sprite edits back to MagicPixel (two-way sync)')
+  .option('--dry-run', 'Print what would be pushed without sending anything')
+  .option('--flatten', 'Allow replacing multi-layer artboards with the flat local image')
+  .addHelpText('after', '\nExamples:\n  $ magicpixel push --dry-run      # see what changed on disk\n  $ magicpixel push                # send local edits + new sprites\n')
+  .action(wrap("push", async (opts) => pushCommand(opts as Parameters<typeof pushCommand>[0])));
+
 
 program
   .command('add <glob>')

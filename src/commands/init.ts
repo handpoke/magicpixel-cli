@@ -16,6 +16,7 @@ import {
 } from '../util/framework.js';
 import { assertSafeOutDir } from '../util/security.js';
 import { atomicWrite } from '../util/atomicWrite.js';
+import { cmd } from '../util/invoke.js';
 
 const WATCH_SCRIPT_NAME = 'magicpixel:watch';
 const WATCH_SCRIPT_CMD = 'magicpixel sync --watch';
@@ -125,12 +126,12 @@ export async function initCommand(opts: InitOpts): Promise<void> {
   if (interactive) {
     console.log();
     console.log(kleur.bold('Next:'));
-    console.log(`  1. ${kleur.dim('magicpixel login')}    ${kleur.dim('# paste your key from https://magicpixel.art/settings')}`);
-    console.log(`  2. ${kleur.dim('magicpixel sync')}     ${kleur.dim('# downloads your assets')}`);
+    console.log(`  1. ${kleur.dim(cmd('login'))}    ${kleur.dim('# paste your key from https://magicpixel.art/settings')}`);
+    console.log(`  2. ${kleur.dim(cmd('sync'))}     ${kleur.dim('# downloads your assets')}`);
     if (watchScriptAdded) {
       console.log(`  3. ${kleur.dim('npm run')} ${WATCH_SCRIPT_NAME}    ${kleur.dim('# keeps assets fresh while you edit')}`);
     } else {
-      console.log(`  3. ${kleur.dim('npx')} magicpixel sync --watch    ${kleur.dim('# keeps assets fresh while you edit')}`);
+      console.log(`  3. ${kleur.dim(`${cmd('sync')} --watch`)}    ${kleur.dim('# keeps assets fresh while you edit')}`);
     }
     console.log();
   }

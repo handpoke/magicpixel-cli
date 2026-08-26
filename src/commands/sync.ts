@@ -5,19 +5,26 @@ import { mkdir, unlink, readdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
 
-import { loadConfig, loadState, saveState, type SyncState } from '../config.js';
+import { loadConfig, loadState, saveState, type SyncedSprite, type SyncState } from '../config.js';
 import { fetchAllManifest, fetchAssetBytes, ApiError, getLastProjectInfo, type ManifestEntry } from '../api.js';
 import { fileSha256 } from '../util/hash.js';
 import { assetDiskPath, assetDiskPathFromKey, pruneEmptyDirs, walkOutDirPngs } from '../util/paths.js';
 import { createLimit } from '../util/limit.js';
 import { emitTypedIndex, ensureAgentsDoc, scanDiskAssets } from '../util/emitIndex.js';
 import { assertPathInsideRoot } from '../util/security.js';
+import { detectProjectKind } from '../util/framework.js';
+import { DEFAULT_UNITY_PPU, writeMissingUnityMetas } from '../util/unityMeta.js';
+import { filterUnityManifest } from '../util/unityFilter.js';
+import { selectFullSyncOrphans } from '../util/prunePolicy.js';
+
+
 
 import { runTmpJanitor } from '../util/tmpJanitor.js';
 import { friendlyFsError } from '../util/errors.js';
 import { maxIsoTimestamp } from '../util/iso.js';
 import { formatBytes } from '../util/format.js';
 import { computePreviousKeyOrphans } from '../util/previousKeyOrphans.js';
+import { cmd } from '../util/invoke.js';
 
 interface SyncOpts {
   prune?: boolean;  // commander: defaults true; --no-prune sets false
@@ -208,7 +215,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
           // support thread and we can correlate against edge function logs.
           const idSuffix = apiErr?.requestId ? kleur.dim(` (request id: ${apiErr.requestId})`) : '';
           console.log(`${kleur.dim(timestamp())} ${kleur.red('✗')} Your key looks invalid or rotated.${idSuffix}`);
-          console.log(kleur.dim('   Fix: run `magicpixel login` (this watcher will keep retrying every 30s).'));
+          console.log(kleur.dim(`   Fix: run \`${cmd('login')}\` (this watcher will keep retrying every 30s).`));
         }
         pausedForAuth = true;
         consecutiveAuthFailures = decision.consecutiveAuthFailures;
@@ -217,7 +224,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
           console.log(
             `${kleur.dim(timestamp())} ${kleur.red('✗')} Giving up after ${MAX_AUTH_FAILURES} consecutive auth failures.`,
           );
-          console.log(kleur.dim('   Fix: run `magicpixel login` with a fresh key, then restart the watcher.'));
+          console.log(kleur.dim(`   Fix: run \`${cmd('login')}\` with a fresh key, then restart the watcher.`));
           // Surface this to /admin/errors — persistent watcher auth failure
           // means a key is mass-rejected (revoked, project deleted, edge
           // misconfig) and we want visibility without waiting for a support
@@ -396,6 +403,70 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     throw e;
   }
 
+  // Unity projects sync only the artboards flagged "Sync to Unity" in the
+  // editor (parity with the in-app sync button). `unitySyncAll: true` in
+  // magicpixel.json opts back into everything.
+  const projectKind = await detectProjectKind();
+  // Files whose artboard is no longer flagged for Unity. Deleted even in
+  // incremental mode: un-checking the box in the editor must actually remove
+  // the sprite from the game project, not leave a stale copy behind.
+  const deselectedPaths: string[] = [];
+  // Sprites whose "Sync to Unity" flag the server omitted. Not downloaded
+  // (strict opt-in) but explicitly shielded from pruning: a transient server
+  // response must never delete art from someone's game project.
+  const unknownFlagPaths = new Set<string>();
+  if (projectKind === 'Unity') {
+    const filtered = filterUnityManifest(manifest, { syncAll: config.unitySyncAll });
+    if (filtered.unknown.length > 0) {
+      console.log(
+        kleur.yellow(
+          `! ${filtered.unknown.length} artboard${filtered.unknown.length === 1 ? '' : 's'} came back without a "Sync to Unity" flag — skipped (existing files kept).`,
+        ),
+      );
+      console.log(kleur.dim(`  Fix: re-run \`${cmd('sync')}\` in a moment, or upgrade with \`npm i -D @magicpixelart/cli@latest\`.`));
+    }
+    const unknownSet = new Set(filtered.unknown);
+    for (const entry of manifest) {
+      if (filtered.entries.includes(entry)) continue;
+      const p = assetDiskPath(config.outDir, entry);
+      if (unknownSet.has(entry)) {
+        unknownFlagPaths.add(p);
+        continue;
+      }
+      if (existsSync(p)) deselectedPaths.push(p);
+    }
+
+    if (filtered.noneFlagged) {
+      // Every artboard is explicitly opted out. Pruning here would delete the
+      // user's whole sprite folder off the back of an unchecked box, so bail
+      // out with a hint instead.
+      if (verbose) {
+        console.log();
+        console.log(kleur.yellow('! No artboards are flagged "Sync to Unity" — nothing to sync.'));
+        console.log(kleur.dim('  Fix: right-click an artboard in MagicPixel → "Sync to Unity",'));
+        console.log(kleur.dim('  or set "unitySyncAll": true in magicpixel.json to sync everything.'));
+      }
+      return {
+        added: [],
+        modified: [],
+        removed: [],
+        unchanged: 0,
+        failed: 0,
+        bytesIn: 0,
+        bytesSaved: 0,
+        renamed: [],
+      };
+    }
+    const skipped = manifest.length - filtered.entries.length;
+    manifest = filtered.entries;
+    if (verbose && skipped > 0) {
+      console.log(
+        kleur.dim(`  unity → ${skipped} artboard${skipped === 1 ? '' : 's'} not flagged for sync (skipped)`),
+      );
+    }
+  }
+
+
   // Detect renames: same id, different key vs prior snapshot.
   const renamed: RenameInfo[] = [];
   for (const entry of manifest) {
@@ -449,9 +520,32 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   // still gated on `!since` to preserve incremental-mode safety (we never
   // delete files outside what the current manifest delta touches).
   const localPngs = await walkOutDirPngs(config.outDir);
+  // Sprites created in Unity (or any PNG we never pulled) are pending a
+  // `magicpixel push`, not orphans — see prunePolicy.ts.
+  let pendingPush: string[] = [];
   if (!since) {
-    orphans = localPngs.map((a) => a.abs).filter((p) => !remoteDiskPaths.has(p));
+    const trackedPaths = new Set(
+      Object.keys(state.synced ?? {})
+        .concat(Object.values(previousAssets))
+        .map((key) => {
+          try {
+            return assetDiskPathFromKey(config.outDir, key);
+          } catch {
+            return '';
+          }
+        })
+        .filter(Boolean),
+    );
+    const policy = selectFullSyncOrphans({
+      localPaths: localPngs.map((a) => a.abs),
+      remoteDiskPaths,
+      protectedPaths: unknownFlagPaths,
+      isTracked: (p) => trackedPaths.has(p),
+    });
+    orphans = policy.orphans;
+    pendingPush = policy.pendingPush;
   }
+
 
   // Heuristic-rename fallback for incremental mode.
   //
@@ -500,6 +594,10 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   // De-duplicate vs the full-sync orphan list.
   const orphanSet = new Set(orphans);
   for (const p of renameStalePaths) orphanSet.add(p);
+  // Un-checked "Sync to Unity" artboards: their PNG (and .meta) leaves the
+  // Unity project on the next sync, incremental or not.
+  for (const p of deselectedPaths) orphanSet.add(p);
+
 
   // Server-side rename history. Each manifest entry carries the composite
   // keys this row was previously emitted under (populated by the editor when
@@ -696,6 +794,29 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     else progress.warn(`Downloaded ${downloaded}, failed ${result.failed} (${formatBytes(result.bytesIn)})`);
   }
 
+  // Unity: write pixel-art-correct `.meta` sidecars so sprites import with
+  // point filtering / no compression instead of Unity's blurry defaults —
+  // parity with the in-app "Sync to Unity" button. Only missing sidecars are
+  // written, so importer settings the user tweaked in Unity are preserved.
+  if (projectKind === 'Unity') {
+    const meta = await writeMissingUnityMetas(
+      manifest.map((entry) => ({ id: entry.id, pngPath: pathFor(entry) })),
+      config.unityPpu ?? DEFAULT_UNITY_PPU,
+    );
+    if (verbose && meta.written > 0) {
+      console.log(
+        kleur.dim(`  unity → ${meta.written} .meta file${meta.written === 1 ? '' : 's'} written`),
+      );
+    }
+    if (verbose && meta.failed > 0) {
+      console.log(
+        kleur.yellow(
+          `  ! ${meta.failed} .meta file${meta.failed === 1 ? '' : 's'} could not be written — Unity will use default import settings.`,
+        ),
+      );
+    }
+  }
+
   // Prune (now default — pass --no-prune to opt out).
   if (shouldPrune && orphans.length > 0) {
     const outRoot = resolve(process.cwd(), config.outDir);
@@ -703,6 +824,9 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       assertPathInsideRoot(p, outRoot, 'outDir');
       try {
         await unlink(p);
+        // Unity sidecar follows its PNG — a stranded .meta shows up in Unity
+        // as a missing-asset warning.
+        await unlink(`${p}.meta`).catch(() => {});
         const relPath = relative(outRoot, p).replace(/\\/g, '/');
         const key = relPath.endsWith('.png') ? relPath.slice(0, -4) : relPath;
         result.removed.push(key);
@@ -710,6 +834,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       } catch (e) {
         if (verbose) console.log(`  ${kleur.yellow('!')} failed to prune ${relative(process.cwd(), p)}: ${(e as Error).message}`);
       }
+
     }
     await pruneEmptyDirs(resolve(process.cwd(), config.outDir));
   } else if (verbose && orphans.length > 0) {
@@ -761,7 +886,34 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       if (removedKeys.has(key)) delete nextAssets[id];
     }
   }
-  const nextState: SyncState = { ...state, assets: nextAssets };
+  // Address book for `magicpixel push`: composite key → artboard + the sha we
+  // just put on disk. Keyed by key (not id) so a disk walk can look it up
+  // without re-fetching the manifest. Renamed/pruned keys are dropped so a
+  // stale entry can never send an edit to the wrong artboard.
+  const nextSynced: Record<string, SyncedSprite> = { ...(state.synced ?? {}) };
+  for (const r of renamed) delete nextSynced[r.oldKey];
+  for (const key of result.removed) delete nextSynced[key];
+  for (const entry of manifest) {
+    if (!entry.asset_id) continue;
+    const sha = entry.sha256 ?? (await fileSha256(pathFor(entry)));
+    if (!sha) continue;
+    // Legacy single-PNG rows have no artboard address (`layer_idx: -1`). Record
+    // them anyway, flagged, so `push` skips them with a hint instead of
+    // adopting the same art as a second document.
+    if (typeof entry.layer_idx !== 'number' || entry.layer_idx < 0) {
+      nextSynced[entry.key] = { assetId: entry.asset_id, layerIdx: 0, sha256: sha, legacy: true };
+      continue;
+    }
+    nextSynced[entry.key] = {
+      assetId: entry.asset_id,
+
+      layerIdx: entry.layer_idx,
+      sha256: sha,
+      ...(typeof entry.layer_count === 'number' ? { layers: entry.layer_count } : {}),
+    };
+  }
+  const nextState: SyncState = { ...state, assets: nextAssets, synced: nextSynced };
+
   if (result.failed === 0) {
     // Advance the cursor to the newest row we actually observed, NOT the
     // wall-clock time the sync started. Using startedAt silently skipped
@@ -836,7 +988,19 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     // would print each rename twice.
     printChanges(result, '  ', { includeRenames: renamed.length === 0 });
     if (renamed.length > 0) printRenames(renamed, { withHints: true });
+    if (pendingPush.length > 0) {
+      console.log();
+      console.log(
+        kleur.yellow(
+          `! ${pendingPush.length} local sprite${pendingPush.length === 1 ? '' : 's'} ${pendingPush.length === 1 ? 'is' : 'are'} not in MagicPixel yet — kept on disk.`,
+        ),
+      );
+      console.log(kleur.dim(`  Fix: run \`${cmd('push')}\` to add them to your library.`));
+    }
   }
+
+
+
   if (result.failed) process.exitCode = 1;
   return result;
 }
