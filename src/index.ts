@@ -100,7 +100,7 @@ program
   .option('--no-prune', 'Keep local files not in the manifest (pruning is now on by default)')
   .option('--dry-run', 'Print the plan without writing files')
   .option('--full', 'Ignore lastSync state; re-fetch the full manifest')
-  .option('-w, --watch [seconds]', 'Poll for changes (default 2s; auto-slows to 5s after ~3min idle, 10s after ~15min)', parseWatchInterval as (v: string, prev: unknown) => string)
+  .option('-w, --watch [seconds]', 'Poll for changes (default 2s; auto-slows to 5s after ~1min idle, 10s after ~5min)', parseWatchInterval as (v: string, prev: unknown) => string)
   .option('-q, --quiet', 'Minimal output (for CI)')
   .option('-c, --concurrency <n>', 'Parallel downloads (1–16, default 6)', parseConcurrency)
   .addHelpText('after', '\nExamples:\n  $ magicpixel sync                # incremental sync\n  $ magicpixel sync --full         # ignore lastSync, re-check everything\n  $ magicpixel sync -w             # watch mode (2s; adaptive idle backoff; exit 2 after 5 auth failures)\n')

@@ -115,7 +115,10 @@ export async function safeFetch(url: string, init: RequestInit = {}): Promise<Re
   let current = url;
   for (let hop = 0; hop < 5; hop++) {
     const res = await fetch(current, { ...init, redirect: 'manual' });
-    if (res.status < 300 || res.status >= 400) return res;
+    // 304 lives in the 3xx range but is a conditional-request answer, not a
+    // redirect: it carries no Location and callers handle it directly.
+    if (res.status < 300 || res.status >= 400 || res.status === 304) return res;
+
     const location = res.headers.get('location');
     await res.body?.cancel();
     if (!location) {

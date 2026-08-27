@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## 0.5.20
+
+- `sync` no longer deletes a PNG that was edited in your project when the sprite
+  leaves the manifest — un-checking "Sync to Unity", trashing the document, or a
+  rename/previous-key sweep now keep the local edit and report it instead.
+
+## 0.5.19
+
+- `sync` no longer overwrites a PNG that changed both on disk and in MagicPixel. Such sprites are reported as conflicts, kept on disk, never pruned, and re-reported until you `push` them or delete the local file.
+- A full reconcile is promoted automatically every 15 minutes (and whenever the server reports it truncated its removal list), so sprites deleted permanently in MagicPixel stop lingering in the game project.
+
+## [0.5.18] — 2026-08-27
+
+### Fixed
+- Trashed documents (and documents converted into component masters) no longer
+  linger in the game project. The manifest now excludes them, and incremental
+  syncs receive an explicit `removed_keys` list so previously pulled sprites are
+  pruned on the next run. Sprites authored in Unity are still never touched.
+- Renaming a folder or toggling its "Sync to Unity" flag now invalidates the
+  manifest cache, so the CLI stops receiving a stale `304 Not Modified`.
+
+## [0.5.17] — 2026-08-27
+
+### Fixed
+- Watch-mode idle backoff now measures wall-clock seconds since the last change
+  instead of `ticks x interval`. Once the watcher had stepped down to 5s/10s
+  ticks the old estimate undercounted elapsed time, so the 5-minute step landed
+  well past 5 minutes.
+- Pushing a locally edited sprite counts as activity again: a run that only
+  pushes (an artist working entirely inside their engine) resets the hot window
+  to the fast interval instead of sliding to the 10s idle poll.
+
+### Changed
+- Idle incremental ticks no longer walk the whole output directory. The listing
+  is only needed by the full-sync orphan sweep and the rename fallback, so it is
+  now computed lazily — an unchanged (304) tick does no filesystem scan.
+
+## [0.5.16] — 2026-08-27
+
+### Changed
+- Manifest validators are persisted in `.magicpixel/state.json`, so a one-shot
+  `sync` (CI, cron, a manual run) gets the same idle `304 Not Modified` a
+  watcher already got on its second tick. Validators are keyed by endpoint plus
+  exact query, so a staging/self-hosted swap or an edited `connect`/`exclude`
+  glob can never be answered from a stale validator.
+
+## [0.5.15] — 2026-08-26
+
+### Changed
+- `sync --watch` sends conditional manifest requests (`If-None-Match`), so an
+  idle tick costs a `304` with no body instead of a full manifest render.
+  Validators are only used on incremental fetches — a full fetch, which prune
+  compares against, always reads the body.
+- Idle backoff is now a hot window: the configured interval applies for ~1 min
+  after the last change, then steps to 5s, then to 10s after ~5 min idle
+  (previously ~3 min / ~15 min).
+
+### Fixed
+- `safeFetch` no longer treated `304` as a malformed redirect. This made every
+  conditional asset download retry five times and then fail as a network error,
+  so unchanged PNGs were re-downloaded in full.
+
+
 ## [0.5.14] — 2026-08-26
 
 ### Fixed

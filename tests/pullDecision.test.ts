@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { shouldPullEntry } from '../src/util/pullDecision.js';
+import { decidePull, type PullDecisionInput } from '../src/util/pullDecision.js';
+
+const shouldPullEntry = (o: PullDecisionInput) => decidePull(o) === 'pull';
 
 const cloud = 'c'.repeat(64);
 const original = 'o'.repeat(64);

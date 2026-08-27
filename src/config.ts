@@ -35,7 +35,6 @@ export interface MagicPixelConfig {
   connect: string[];
 }
 
-
 /**
  * What the CLI last pulled for one composite key. `magicpixel push` needs the
  * exact artboard address plus the composite sha it wrote to disk, so a disk
@@ -77,7 +76,6 @@ export interface SyncedSprite {
   sourceRel?: string;
 }
 
-
 export interface SyncState {
   lastSync?: string;
   /** Map of manifest asset id → key, captured at the end of each successful sync.
@@ -87,7 +85,18 @@ export interface SyncState {
   synced?: Record<string, SyncedSprite>;
   /** Last error message surfaced by `sync` (for `magicpixel doctor`). Cleared on a clean run. */
   lastError?: string;
-
+  /**
+   * Manifest ETag validators (endpoint+query → validator) from the last run, so
+   * a one-shot `sync` gets the same idle 304 as a watcher. Advisory only: a
+   * stale or missing entry just costs one full manifest response.
+   */
+  manifestEtags?: Record<string, string>;
+  /**
+   * ISO time of the last full (non-incremental) pass. Incremental runs cannot
+   * see a permanently deleted row — the cloud has nothing left to report — so a
+   * full reconcile is promoted periodically to clear orphaned PNGs.
+   */
+  lastReconcile?: string;
 }
 
 export const defaultConfig: MagicPixelConfig = {
@@ -190,7 +199,6 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<MagicPixe
     connect,
   };
 }
-
 
 const MAX_GLOBS = 64;
 

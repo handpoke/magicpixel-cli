@@ -35,7 +35,6 @@ export interface ManifestEntry {
   layer_count?: number;
 }
 
-
 export interface ManifestProjectInfo {
   /** UUID of the project the API key is scoped to. */
   id: string;
@@ -51,14 +50,78 @@ export interface ManifestResponse {
   items: ManifestEntry[];
   nextCursor: string | null;
   count: number;
+  /** Composite keys that left the cloud since `since` (document trashed, or
+   *  converted into a component master). Absent on older edge deploys and on
+   *  full (non-incremental) fetches. */
+  removed_keys?: string[];
+  /** Set when the server's removals window overflowed (or its scan failed), so
+   *  `removed_keys` is incomplete and the client must reconcile against a full
+   *  manifest this run instead of trusting the incremental list. */
+  removals_truncated?: boolean;
   project?: ManifestProjectInfo;
 }
+
 
 interface FetchManifestOpts {
   config: MagicPixelConfig;
   since?: string;
   cursor?: string;
   limit?: number;
+  /**
+   * Send `If-None-Match` and allow a `304` (empty `items` by construction
+   * rather than by query result). Opt-in because a caller that treats `items`
+   * as the full cloud truth — anything feeding prune — would read a 304 as
+   * "cloud is empty".
+   */
+  conditional?: boolean;
+}
+
+/**
+ * Manifest validators, so an idle poll costs a conditional GET (304, no body)
+ * instead of a full manifest render. Keyed by endpoint + exact query string: a
+ * different `since`/glob set — or a different server — is a different
+ * projection and must not reuse a validator.
+ *
+ * Bounded so a long-lived watcher walking many `since` values can't grow it
+ * without limit; eviction is FIFO and only costs one non-conditional GET.
+ *
+ * `sync` persists this map into state.json (see `manifestEtagsSnapshot` /
+ * `primeManifestEtags`) so one-shot runs — CI, cron, a manual `sync` — get the
+ * same 304 as a watcher's second tick.
+ */
+const manifestEtags = new Map<string, string>();
+const MAX_MANIFEST_ETAGS = 32;
+
+function rememberManifestEtag(key: string, etag: string): void {
+  manifestEtags.delete(key);
+  manifestEtags.set(key, etag);
+  while (manifestEtags.size > MAX_MANIFEST_ETAGS) {
+    const oldest = manifestEtags.keys().next().value;
+    if (oldest === undefined) break;
+    manifestEtags.delete(oldest);
+  }
+}
+
+/**
+ * Seed validators persisted by an earlier run. Ignores non-string junk so a
+ * hand-edited state.json can't inject a bogus header value; a wrong-but-typed
+ * validator is harmless (the server just answers 200 with a body).
+ */
+export function primeManifestEtags(entries: unknown): void {
+  if (!entries || typeof entries !== 'object' || Array.isArray(entries)) return;
+  for (const [key, etag] of Object.entries(entries as Record<string, unknown>)) {
+    if (typeof etag === 'string' && etag) rememberManifestEtag(key, etag);
+  }
+}
+
+/** Snapshot of the current validators, for persisting into state.json. */
+export function manifestEtagsSnapshot(): Record<string, string> {
+  return Object.fromEntries(manifestEtags);
+}
+
+/** Test seam: drop cached manifest validators between cases. */
+export function __resetManifestEtagsForTesting(): void {
+  manifestEtags.clear();
 }
 
 /**
@@ -146,17 +209,34 @@ export async function fetchManifestPage(opts: FetchManifestOpts): Promise<Manife
   if (opts.cursor) url.searchParams.set('cursor', opts.cursor);
   if (opts.limit) url.searchParams.set('limit', String(opts.limit));
 
+  // Conditional GET: an unchanged scope comes back as a 304 with no body.
+  // Only for un-paginated requests — the server doesn't validate cursor pages.
+  // Key includes the origin+path so a persisted validator can't be replayed
+  // against a different endpoint (self-hosted / staging swap).
+  const etagKey = opts.conditional && !opts.cursor ? `${url.origin}${url.pathname}${url.search}` : null;
+  const knownEtag = etagKey ? manifestEtags.get(etagKey) : undefined;
+
   // Reuse the same transient-failure policy as asset downloads, with extra
   // 546 attempts so first-run can ride out a worker recycle without stalling
   // every PNG download for ~30s.
   return retryTransient(`manifest`, async () => {
-    const { headers, requestId } = buildHeaders();
+    const { headers, requestId } = buildHeaders(
+      knownEtag ? { 'If-None-Match': knownEtag } : undefined,
+    );
     const res = await safeFetch(url.href, { headers });
     const serverRequestId = res.headers.get('x-request-id') ?? requestId;
+    if (res.status === 304) {
+      const minCli = res.headers.get('x-magicpixel-min-cli-version');
+      if (minCli) maybeWarnStaleCli(minCli);
+      return { items: [], nextCursor: null, count: 0 };
+    }
     if (res.status >= 200 && res.status < 300) {
       const minCli = res.headers.get('x-magicpixel-min-cli-version');
       if (minCli) maybeWarnStaleCli(minCli);
+      const etag = res.headers.get('etag');
+      if (etagKey && etag) rememberManifestEtag(etagKey, etag);
       const data = (await res.json()) as Partial<ManifestResponse> | null;
+
       // Shape-guard the response. A malformed edge response (null,
       // {items: null}, nextCursor: 42, etc.) would otherwise either crash
       // inside the pagination loop ("null is not iterable") or get fed back
@@ -301,20 +381,41 @@ function compareSemver(a: string, b: string): number {
   return 0;
 }
 
-export async function fetchAllManifest(
+export interface ManifestSnapshot {
+  entries: ManifestEntry[];
+  /** Keys the cloud says are gone (incremental fetches only). */
+  removedKeys: string[];
+  /** Removal list is incomplete — caller must fall back to a full reconcile. */
+  removalsTruncated: boolean;
+}
+
+/** Full manifest walk, including the cloud's removal list. */
+export async function fetchManifestSnapshot(
   config: MagicPixelConfig,
   since?: string,
-): Promise<ManifestEntry[]> {
+): Promise<ManifestSnapshot> {
   const out: ManifestEntry[] = [];
+  const removed = new Set<string>();
+  let removalsTruncated = false;
   let cursor: string | undefined;
+  // Conditional GETs only on incremental fetches. An incremental 304 means
+  // "nothing changed since `since`", which is indistinguishable from the empty
+  // incremental page callers already handle. A full fetch (`since` unset) is
+  // the cloud truth that prune compares against, so it always reads the body.
+  const conditional = !!since;
   // Cycle guard: caps total pages so a buggy server cursor can't hang the CLI.
   // At 500 entries/page this is 100k assets — well past any realistic project.
   const MAX_PAGES = 200;
   for (let page = 0; page < MAX_PAGES; page++) {
-    const res = await fetchManifestPage({ config, since, cursor, limit: 500 });
+    const res = await fetchManifestPage({ config, since, cursor, limit: 500, conditional });
+
     out.push(...res.items);
+    if (Array.isArray(res.removed_keys)) {
+      for (const k of res.removed_keys) if (typeof k === 'string' && k) removed.add(k);
+    }
+    if (res.removals_truncated === true) removalsTruncated = true;
     const nextCursor = res.nextCursor ?? undefined;
-    if (!nextCursor) return out;
+    if (!nextCursor) return { entries: out, removedKeys: [...removed], removalsTruncated };
     // Detect a stuck cursor (server returns the same token it just received)
     // in O(1) round-trips instead of burning the full page budget.
     if (nextCursor === cursor) {
@@ -330,6 +431,15 @@ export async function fetchAllManifest(
       `  Fix: re-run with --full, or report at https://github.com/magicpixel/cli/issues.`,
   );
 }
+
+/** Entries only — for read-only commands (`list`, `status`). */
+export async function fetchAllManifest(
+  config: MagicPixelConfig,
+  since?: string,
+): Promise<ManifestEntry[]> {
+  return (await fetchManifestSnapshot(config, since)).entries;
+}
+
 
 /**
  * Download a single asset by key. Returns null on 304 (not modified).
@@ -416,7 +526,6 @@ export interface PushResult {
   /** Adopt only: the key the manifest will use. Differs from the disk key when
    *  the server's slug/collision handling renamed the document. */
   cloudKey?: string;
-
 }
 
 /** CLI send size. The server allows 20; smaller batches survive Worker 502s. */

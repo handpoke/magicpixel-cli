@@ -6,7 +6,7 @@ import { dirname, relative, resolve } from 'node:path';
 
 import { loadConfig, loadState, saveState, type SyncedSprite, type SyncState } from '../config.js';
 import { ensureEngineConnect } from '../util/engineConnect.js';
-import { fetchAllManifest, fetchAssetBytes, ApiError, getLastProjectInfo, type ManifestEntry } from '../api.js';
+import { fetchManifestSnapshot, fetchAssetBytes, ApiError, getLastProjectInfo, primeManifestEtags, manifestEtagsSnapshot, type ManifestEntry } from '../api.js';
 import { fileSha256 } from '../util/hash.js';
 import { pruneEmptyDirs, walkOutDirPngs } from '../util/paths.js';
 import { createLimit } from '../util/limit.js';
@@ -25,7 +25,9 @@ import { formatBytes } from '../util/format.js';
 import { computePreviousKeyOrphans } from '../util/previousKeyOrphans.js';
 import { cmd } from '../util/invoke.js';
 import { formatWatchSpriteLine } from '../util/watchCopy.js';
-import { shouldPullEntry } from '../util/pullDecision.js';
+import { decidePull } from '../util/pullDecision.js';
+import { hasUnpushedLocalEdit } from '../util/localEdit.js';
+import { shouldReconcile } from '../util/reconcile.js';
 import { runPush, type PushSummary } from './push.js';
 
 interface SyncOpts {
@@ -52,6 +54,37 @@ interface SyncResult {
   failed: number;
   bytesIn: number;
   bytesSaved: number;
+  /**
+   * Keys edited both on disk and in MagicPixel since the last sync. Never
+   * downloaded (that would destroy the local edit) and never pruned; the user
+   * resolves them, then the next sync proceeds normally.
+   */
+  conflicts: string[];
+  /**
+   * Outcome of the local→cloud push half of the run, when it ran. Watch mode
+   * uses it to keep the poll hot while the user is editing in their engine —
+   * pushes never appear in `added`/`modified` (those are pulls).
+   */
+  pushed?: PushSummary | null;
+}
+
+/** Did the push half of a run actually move bytes into MagicPixel? */
+export function pushWasActive(pushed: PushSummary | null | undefined): boolean {
+  if (!pushed) return false;
+  return pushed.created > 0 || pushed.updated > 0 || pushed.imported > 0;
+}
+
+/**
+ * Two consumers need the local PNG listing: the full-sync orphan sweep (no
+ * `since`) and the sha-based rename fallback (incremental, and only when
+ * something is download-bound). On an idle incremental tick — the common case
+ * now that unchanged manifests come back as a bodyless 304 — neither runs, so
+ * walking the whole output tree would be pure waste.
+ *
+ * Full syncs must ALWAYS walk: skipping there would silently disable pruning.
+ */
+export function needsLocalPngWalk(since: string | undefined, toDownloadCount: number): boolean {
+  return !since || toDownloadCount > 0;
 }
 
 export async function syncCommand(opts: SyncOpts): Promise<void> {
@@ -128,17 +161,20 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
   // genuinely broken (revoked key) rather than transiently blipped.
   const MAX_AUTH_FAILURES = 5;
   let consecutiveAuthFailures = 0;
-  // Adaptive idle backoff: after a few minutes of nothing-to-do we slow the
-  // poll from intervalSec → 5s → 10s so a dev who walked away isn't hammering
-  // the manifest endpoint. ANY change OR error resets this back to intervalSec,
-  // so the "edit → see it" promise stays intact the moment the user comes
-  // back. Error backoff (2→60s) is separate and continues to win.
-  let consecutiveIdleTicks = 0;
-  // Thresholds in seconds (NOT ticks) so a `--watch 10` user gets the same
-  // ~3 min / ~15 min UX as a default `--watch 2` user. Previously these were
-  // tick counts (90 / 300) which made the slowdown timing scale with intervalSec.
-  const IDLE_SOFT_BACKOFF_SECONDS = 180;
-  const IDLE_HARD_BACKOFF_SECONDS = 900;
+  // Adaptive idle backoff: the fast interval is a "hot window" around actual
+  // work, not a steady state. After ~1 min of nothing-to-do we slow the poll
+  // from intervalSec → 5s, and after ~5 min → 10s, so a dev who walked away
+  // isn't polling the manifest hundreds of times an hour. ANY change (pulled
+  // OR pushed) or error resets this, so the "edit → see it" promise stays
+  // intact the moment the user comes back. Error backoff (2→60s) is separate
+  // and continues to win.
+  //
+  // Idle is measured in wall-clock seconds since the last change, not in
+  // ticks: once we've backed off, a "tick" is 5s or 10s long, so counting
+  // ticks × intervalSec would undercount elapsed time and push the 5-minute
+  // step far past 5 minutes.
+  let lastChangeAt = Date.now();
+
   // Re-walk the game tree on this cadence so new PNGs are ingested without
   // listing thousands of folders on every 2s tick.
   const GAME_INDEX_TTL_MS = 30_000;
@@ -217,17 +253,17 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
         console.log(`${kleur.dim(timestamp())} ${kleur.green('✓')} Back online — resuming.`);
       }
       const changedCount = r.added.length + r.modified.length + r.removed.length + r.renamed.length;
-      if (changedCount > 0) {
+      // Pushing a locally edited sprite is activity too — it just isn't part of
+      // the printed pull list. Without it, an artist working only in Unity
+      // would slide into the 10s idle poll while actively saving files.
+      if (changedCount > 0 || pushWasActive(r.pushed)) {
         // Snap back to the fast interval the moment anything changes.
-        consecutiveIdleTicks = 0;
+        lastChangeAt = Date.now();
         backoffSec = intervalSec;
       } else {
-        consecutiveIdleTicks++;
-        backoffSec = nextBackoffForIdle(consecutiveIdleTicks, intervalSec, {
-          softSec: IDLE_SOFT_BACKOFF_SECONDS,
-          hardSec: IDLE_HARD_BACKOFF_SECONDS,
-        });
+        backoffSec = nextBackoffForIdle((Date.now() - lastChangeAt) / 1000, intervalSec);
       }
+
       if (opts.quiet) return;
       if (changedCount > 0) {
         process.stdout.write('\x1b[2K\r');
@@ -246,7 +282,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
       const firstLine = err.message.split('\n')[0];
       process.stdout.write('\x1b[2K\r');
       // Any error breaks the idle streak so we come back fast once it clears.
-      consecutiveIdleTicks = 0;
+      lastChangeAt = Date.now();
 
       const decision = classifyTickError(err, {
         backoffSec,
@@ -343,17 +379,25 @@ function isNetworkError(err: Error): boolean {
 }
 
 /**
- * Pure helper: given how many consecutive idle ticks we've seen and the
- * configured poll interval, return the next backoff in seconds. Exported so
- * the watch-mode regression test can guard the "ticks vs seconds" bug fixed
- * in 0.4.0 without exercising the full watch loop.
+ * Idle thresholds (seconds of consecutive idleness) at which the watcher steps
+ * down from the configured interval to 5s, then to 10s. Single source of truth
+ * for both the watch loop and its regression tests.
+ */
+export const IDLE_BACKOFF_THRESHOLDS = { softSec: 60, hardSec: 300 } as const;
+
+/**
+ * Pure helper: given how long we've been idle (wall-clock seconds since the
+ * last pulled or pushed change) and the configured poll interval, return the
+ * next backoff in seconds. Exported so the watch-mode regression test can guard
+ * the "ticks vs seconds" bug fixed in 0.4.0 without exercising the full watch
+ * loop. Callers pass elapsed time, not tick counts: once the watcher has backed
+ * off, ticks are longer than `intervalSec`.
  */
 export function nextBackoffForIdle(
-  consecutiveIdleTicks: number,
+  idleSeconds: number,
   intervalSec: number,
-  thresholds: { softSec: number; hardSec: number } = { softSec: 180, hardSec: 900 },
+  thresholds: { softSec: number; hardSec: number } = IDLE_BACKOFF_THRESHOLDS,
 ): number {
-  const idleSeconds = consecutiveIdleTicks * intervalSec;
   if (idleSeconds >= thresholds.hardSec) return Math.max(intervalSec, 10);
   if (idleSeconds >= thresholds.softSec) return Math.max(intervalSec, 5);
   return intervalSec;
@@ -440,6 +484,12 @@ async function loadWatchHeader(
 async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResult> {
   const config = await loadConfig();
   const state = await loadState();
+  // Seed manifest validators persisted by the previous run so a one-shot sync
+  // can answer with a 304 on its very first poll (watchers already keep them
+  // in memory). A `--full` run intentionally sends no `since`, which is a
+  // different validator key, so it can't be short-circuited by a stale entry.
+  primeManifestEtags(state.manifestEtags);
+
   const startedAt = new Date().toISOString();
   const concurrency = Math.max(1, Math.min(opts.concurrency ?? 6, 16));
   const verbose = !opts.quiet && !runOpts.watchMode;
@@ -451,7 +501,13 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     console.log(kleur.yellow(`! using custom endpoint: ${config.endpoint}`));
   }
 
-  const since = opts.full ? undefined : state.lastSync;
+  // Incremental unless asked for a full run — or unless a full pass is due:
+  // permanently-deleted rows can't be reported incrementally (see reconcile.ts).
+  const reconcileDue = !opts.full && !!state.lastSync && shouldReconcile(state.lastReconcile, Date.now());
+  let since = opts.full || reconcileDue ? undefined : state.lastSync;
+  if (reconcileDue && verbose) {
+    console.log(kleur.dim('Running a full reconcile (periodic) to clear anything deleted in MagicPixel.'));
+  }
   const previousAssets = state.assets ?? {};  // id → key from prior sync
 
   const spinner: Ora | null = verbose
@@ -459,12 +515,28 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     : null;
   if (!spinner) onStatus?.(since ? 'Checking MagicPixel for edits…' : 'Fetching your sprites from MagicPixel…');
   let manifest: ManifestEntry[];
+  // Composite keys the cloud reports as gone (document trashed / componentized)
+  // since our cursor. Empty on --full, where the manifest itself is the truth.
+  let removedRemoteKeys: string[] = [];
   // Capture before the Unity filter drops rows — lastSync must not jump past
   // an editor save whose `unity` flag was omitted on this tick.
   let observedUpdatedAt: string | null = null;
   try {
-    manifest = await fetchAllManifest(config, since);
+    let snapshot = await fetchManifestSnapshot(config, since);
+    if (snapshot.removalsTruncated && since) {
+      // The server couldn't list every removal in this window. Trusting the
+      // partial list and advancing the cursor would strand the rest forever, so
+      // re-read the whole manifest and let the orphan sweep decide.
+      if (verbose) {
+        console.log(kleur.dim('Many sprites were removed at once — re-reading the full manifest to stay in sync.'));
+      }
+      since = undefined;
+      snapshot = await fetchManifestSnapshot(config, undefined);
+    }
+    manifest = snapshot.entries;
+    removedRemoteKeys = snapshot.removedKeys;
     observedUpdatedAt = maxIsoTimestamp(manifest.map((e) => e.updated_at));
+
     const projectInfo = getLastProjectInfo();
     const projectSuffix = projectInfo && verbose
       ? kleur.dim(` · project: ${projectInfo.name ?? projectInfo.id.slice(0, 8)}`)
@@ -593,12 +665,21 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
         bytesIn: 0,
         bytesSaved: 0,
         renamed: [],
+        conflicts: [],
       };
-      if (observedUpdatedAt) {
-        const lastSync =
-          state.lastSync && state.lastSync > observedUpdatedAt ? state.lastSync : observedUpdatedAt;
-        await saveState({ ...state, lastSync });
-      }
+      // Persist validators even when the cursor didn't move, so the next
+      // one-shot run starts from a conditional GET.
+      const lastSync =
+        observedUpdatedAt && !(state.lastSync && state.lastSync > observedUpdatedAt)
+          ? observedUpdatedAt
+          : state.lastSync;
+      await saveState({
+        ...state,
+        ...(lastSync ? { lastSync } : {}),
+        ...(since ? {} : { lastReconcile: startedAt }),
+        manifestEtags: manifestEtagsSnapshot(),
+      });
+
       await maybePushLocalSprites(config.push, verbose, gameIndex, live && !!runOpts.watchMode, onStatus);
       return empty;
     }
@@ -610,7 +691,6 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       );
     }
   }
-
 
   // Detect renames: same id, different key vs prior snapshot.
   const renamed: RenameInfo[] = [];
@@ -649,6 +729,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   const diffLimit = createLimit(concurrency);
   const shaByEntryId = new Map<string, string | null>();
   const toDownload: ManifestEntry[] = [];
+  const conflicts: string[] = [];
   let bytesSaved = 0;
   let unchanged = 0;
   const synced = state.synced ?? {};
@@ -687,13 +768,16 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
         }
         const localSha = await fileSha256(pathFor(entry));
         shaByEntryId.set(entry.id, localSha);
-        const pull = shouldPullEntry({
+        const decision = decidePull({
           cloudSha256: entry.sha256,
           localSha256: localSha,
           previousCloudSha256,
+          lastPushedDiskSha256: synced[entry.key]?.diskSha256,
           inWorkingSet,
         });
-        if (!pull) {
+        if (decision === 'conflict') {
+          conflicts.push(entry.key);
+        } else if (decision === 'skip') {
           unchanged++;
           if (entry.size_bytes) bytesSaved += entry.size_bytes;
         } else {
@@ -707,35 +791,36 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   // (Renames also produce a stale path on disk — collected separately below.)
   let orphans: string[] = [];
   const remoteDiskPaths = new Set(manifest.map((e) => pathFor(e)));
-  // We walk local PNGs even in incremental mode so the sha-based rename
-  // fallback below has something to match against. The full-orphan path is
-  // still gated on `!since` to preserve incremental-mode safety (we never
-  // delete files outside what the current manifest delta touches).
-  const localPngs = await walkOutDirPngs(config.outDir);
+  const remoteKeySet = new Set(manifest.map((e) => e.key));
+  const previousKeySet = new Set(Object.values(previousAssets));
+
+  const localPngs = needsLocalPngWalk(since, toDownload.length)
+    ? await walkOutDirPngs(config.outDir)
+    : [];
+
+  // Every key we have ever synced, indexed by the disk path it maps to. Used
+  // both for orphan tracking and to look up a prune candidate's edit baseline.
+  const keyByPath = new Map<string, string>();
+  for (const key of Object.keys(state.synced ?? {}).concat(Object.values(previousAssets))) {
+    try {
+      const p = pathForKey(key);
+      if (!keyByPath.has(p)) keyByPath.set(p, key);
+    } catch {
+      /* unusable key — nothing to track */
+    }
+  }
+
   // Sprites created in Unity (or any PNG we never pulled) are pending a
   // push into MagicPixel, not orphans — see prunePolicy.ts.
   if (!since) {
-    const trackedPaths = new Set(
-      Object.keys(state.synced ?? {})
-        .concat(Object.values(previousAssets))
-        .map((key) => {
-          try {
-            return pathForKey(key);
-          } catch {
-            return '';
-          }
-        })
-        .filter(Boolean),
-    );
     const policy = selectFullSyncOrphans({
       localPaths: localPngs.map((a) => a.abs),
       remoteDiskPaths,
       protectedPaths: unknownFlagPaths,
-      isTracked: (p) => trackedPaths.has(p),
+      isTracked: (p) => keyByPath.has(p),
     });
     orphans = policy.orphans;
   }
-
 
   // Heuristic-rename fallback for incremental mode.
   //
@@ -788,14 +873,17 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       }
     })
     .filter((p) => p && existsSync(p) && isPathInside(p, outRoot));
-  // De-duplicate vs the full-sync orphan list.
+  // Every prune candidate goes through `addOrphan`, so no source can bypass the
+  // local-edit guard applied below. De-duplicates vs the full-sync orphan list.
   const orphanSet = new Set(orphans);
-  for (const p of renameStalePaths) orphanSet.add(p);
+  const addOrphan = (p: string) => {
+    if (existsSync(p) && isPathInside(p, outRoot)) orphanSet.add(p);
+  };
+  for (const p of renameStalePaths) addOrphan(p);
   // Un-checked "Sync to Unity" artboards: their PNG (and .meta) leaves the
   // Unity project on the next sync, incremental or not. Working-set originals
   // are never in this list.
-  for (const p of deselectedPaths) orphanSet.add(p);
-
+  for (const p of deselectedPaths) addOrphan(p);
 
   // Server-side rename history. Each manifest entry carries the composite
   // keys this row was previously emitted under (populated by the editor when
@@ -809,16 +897,57 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     resolveDiskPath: (key) => pathForKey(key),
     fileExists: existsSync,
   });
-  for (const p of prevKeyResult.orphanPaths) {
-    if (isPathInside(p, outRoot)) orphanSet.add(p);
-  }
+  for (const p of prevKeyResult.orphanPaths) addOrphan(p);
   for (const r of prevKeyResult.renames) {
     if (!renamed.some((x) => x.id === r.id && x.oldKey === r.oldKey)) {
       renamed.push(r);
     }
   }
 
-  orphans = [...orphanSet];
+  // Cloud-side removals (document trashed, or converted into a component
+  // master). These rows leave the manifest entirely, so an incremental run has
+  // no other way to learn about them — without this the PNG would live on in
+  // the game project forever. Only keys we pulled ourselves are eligible:
+  // a same-named sprite authored in Unity is pending push, not an orphan.
+  for (const key of removedRemoteKeys) {
+    if (remoteKeySet.has(key)) continue; // still live under another row
+    if (!synced[key] && !previousKeySet.has(key)) continue; // never ours
+    try {
+      addOrphan(pathForKey(key));
+    } catch {
+      continue;
+    }
+  }
+
+  // A locally-edited file is never deleted, whatever put it in the prune set
+  // (deselected "Sync to Unity", trashed document, rename fallback,
+  // previous-key sweep): that edit is the only copy of the work until the user
+  // pushes it or discards it. Manifest-resident conflicts were already detected
+  // during the diff, so they skip the re-hash.
+  const conflictPaths = new Set<string>();
+  for (const key of conflicts) {
+    try {
+      conflictPaths.add(pathForKey(key));
+    } catch {
+      /* unusable key — nothing to protect */
+    }
+  }
+  orphans = [];
+  const keptFromPrune: string[] = [];
+  for (const p of orphanSet) {
+    if (conflictPaths.has(p)) continue;
+    const key = keyByPath.get(p);
+    if (
+      key &&
+      (await hasUnpushedLocalEdit({ absPath: p, baselineDiskSha256: synced[key]?.diskSha256 }))
+    ) {
+      keptFromPrune.push(key);
+      continue;
+    }
+    orphans.push(p);
+  }
+  conflicts.push(...keptFromPrune);
+
 
   // Legacy-suffix folder sweep — always runs, even in incremental mode.
   //
@@ -851,7 +980,6 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   }
   const legacyFolders = await findLegacySuffixFolders(config.outDir, knownFolderSlugs);
 
-
   if (verbose) {
     console.log();
     console.log(kleur.bold('Plan:'));
@@ -871,6 +999,15 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     console.log();
   }
 
+  if (conflicts.length > 0) {
+    if (live) {
+      printConflicts(conflicts, new Set(keptFromPrune));
+    }
+    onStatus?.(
+      `${conflicts.length} sprite${conflicts.length === 1 ? '' : 's'} changed in both places — kept your local copy.`,
+    );
+  }
+
   if (opts.dryRun) {
     if (verbose) {
       console.log(kleur.dim('--dry-run: no files written.'));
@@ -887,10 +1024,9 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       failed: 0,
       bytesIn: 0,
       bytesSaved,
+      conflicts,
     };
   }
-
-
 
   const result: SyncResult = {
     added: [],
@@ -901,6 +1037,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     failed: 0,
     bytesIn: 0,
     bytesSaved,
+    conflicts,
   };
 
   let progress: Ora | null = null;
@@ -1039,7 +1176,6 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       } catch (e) {
         if (verbose) console.log(`  ${kleur.yellow('!')} failed to prune ${relative(process.cwd(), p)}: ${(e as Error).message}`);
       }
-
     }
     await pruneEmptyDirs(resolve(process.cwd(), config.outDir));
   } else if (verbose && orphans.length > 0) {
@@ -1076,7 +1212,6 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     printLegacyFolders(legacyFolders);
   }
 
-
   // Always persist the id → key snapshot so rename detection survives even
   // when `emitIndex` is toggled off-then-on. `lastSync` only advances on a
   // clean run, so partial-failure syncs are retried from the prior cursor.
@@ -1101,8 +1236,13 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   }
   for (const key of result.removed) delete nextSynced[key];
   const writtenKeys = new Set([...result.added, ...result.modified]);
+  const conflictSet = new Set(conflicts);
   for (const entry of manifest) {
     if (!entry.asset_id) continue;
+    // Conflicted keys keep their old baselines: recording the new cloud sha
+    // (with the locally-edited disk sha) would make both halves believe they
+    // are in sync and freeze the divergence forever.
+    if (conflictSet.has(entry.key)) continue;
     const sha = entry.sha256 ?? (await fileSha256(pathFor(entry)));
     if (!sha) continue;
     const prev = nextSynced[entry.key];
@@ -1127,9 +1267,18 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       ...(sourceRel ? { sourceRel } : {}),
     };
   }
-  const nextState: SyncState = { ...state, assets: nextAssets, synced: nextSynced };
+  const nextState: SyncState = {
+    ...state,
+    assets: nextAssets,
+    synced: nextSynced,
+    manifestEtags: manifestEtagsSnapshot(),
+    // A completed full pass is the only run that can prove nothing is orphaned.
+    ...(!since && result.failed === 0 ? { lastReconcile: startedAt } : {}),
+  };
 
-  if (result.failed === 0) {
+  // Unresolved conflicts hold the cursor, exactly like a failed download: the
+  // next sync must see the same rows again and re-report them.
+  if (result.failed === 0 && conflicts.length === 0) {
     // Advance the cursor to the newest row we actually observed, NOT the
     // wall-clock time the sync started. Using startedAt silently skipped
     // rows whose `updated_at` lived in the gap between the manifest snapshot
@@ -1150,8 +1299,12 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       nextState.lastSync = startedAt;
     }
     delete nextState.lastError;
-  } else {
+  } else if (result.failed > 0) {
     nextState.lastError = `${result.failed} download${result.failed === 1 ? '' : 's'} failed at ${startedAt}`;
+  } else {
+    nextState.lastError =
+      `${conflicts.length} sprite${conflicts.length === 1 ? '' : 's'} changed both locally and in MagicPixel at ${startedAt}` +
+      ` (${conflicts.slice(0, 3).join(', ')}${conflicts.length > 3 ? ', …' : ''})`;
   }
 
   // Emit typed index from the filesystem — never from the manifest. This
@@ -1206,10 +1359,16 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   }
 
   onStatus?.('Checking your game files…');
-  await maybePushLocalSprites(config.push, verbose, gameIndex, live && !!runOpts.watchMode, onStatus);
+  const pushed = await maybePushLocalSprites(
+    config.push,
+    verbose,
+    gameIndex,
+    live && !!runOpts.watchMode,
+    onStatus,
+  );
 
   if (result.failed) process.exitCode = 1;
-  return result;
+  return { ...result, pushed };
 }
 
 async function maybePushLocalSprites(
@@ -1264,7 +1423,6 @@ function printRenames(renamed: RenameInfo[], opts: { withHints: boolean }): void
   }
 }
 
-
 function progressText(done: number, total: number, bytes: number): string {
   const pct = total === 0 ? 100 : Math.round((done / total) * 100);
   const barWidth = 24;
@@ -1283,6 +1441,34 @@ function humanTime(iso: string): string {
     return new Date(iso).toLocaleString();
   } catch {
     return iso;
+  }
+}
+
+/**
+ * Both-sides-changed report. Printed on every run that has conflicts (also in
+ * watch mode) because the alternative — staying silent — is what makes a lost
+ * edit feel like a sync bug.
+ */
+function printConflicts(keys: string[], removedRemotely: ReadonlySet<string> = new Set()) {
+  console.log();
+  console.log(
+    kleur.yellow(`${keys.length} sprite${keys.length === 1 ? '' : 's'} changed in both places — not overwritten:`),
+  );
+  for (const key of keys) {
+    const note = removedRemotely.has(key) ? kleur.dim(' (no longer synced from MagicPixel)') : '';
+    console.log(`  ${kleur.yellow('~')} ${key}${note}`);
+  }
+  console.log(
+    kleur.dim(
+      `  Keep the local edit: run \`${cmd('push')}\` (it will report the cloud change), or delete the PNG to accept MagicPixel's copy.`,
+    ),
+  );
+  if (removedRemotely.size > 0) {
+    console.log(
+      kleur.dim(
+        `  Marked (no longer synced): re-check "Sync to Unity" (or restore the document) to push the edit up, or delete the PNG to accept the removal.`,
+      ),
+    );
   }
 }
 
@@ -1357,7 +1543,6 @@ function printLegacyFolders(legacy: LegacyFolder[]): void {
     console.log(`    ${kleur.dim(`Find/replace in your project:  ${lf.legacyName}/  →  ${lf.currentSlug}/`)}`);
   }
 }
-
 
 // Note: orphan scan delegates to `walkOutDirPngs` in util/paths.ts (shared
 // with the typed-index emitter). `maxIsoTimestamp` lives in util/iso.ts.

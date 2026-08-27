@@ -120,4 +120,10 @@ describe('loadState corrupt-quarantine recovery', () => {
     const siblings = await readdir(join(dir, '.magicpixel'));
     expect(siblings.filter((n) => /^state\.json\.\d+\.[0-9a-f]{16}\.tmp$/.test(n))).toEqual([]);
   });
+
+  it('round-trips manifest validators so a one-shot sync can send If-None-Match', async () => {
+    const etags = { 'https://api.example.com/manifest?since=x': 'W/"m1-abc"' };
+    await saveState({ manifestEtags: etags }, dir);
+    expect((await loadState(dir)).manifestEtags).toEqual(etags);
+  });
 });
