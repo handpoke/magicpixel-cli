@@ -1,11 +1,11 @@
 import kleur from 'kleur';
 import ora, { type Ora } from 'ora';
-import { createHash } from 'node:crypto';
 import { mkdir, unlink, readdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
 
 import { loadConfig, loadState, saveState, type SyncedSprite, type SyncState } from '../config.js';
+import { ensureEngineConnect } from '../util/engineConnect.js';
 import { fetchAllManifest, fetchAssetBytes, ApiError, getLastProjectInfo, type ManifestEntry } from '../api.js';
 import { fileSha256 } from '../util/hash.js';
 import { pruneEmptyDirs, walkOutDirPngs } from '../util/paths.js';
@@ -13,10 +13,10 @@ import { createLimit } from '../util/limit.js';
 import { emitTypedIndex, ensureAgentsDoc, scanDiskAssets } from '../util/emitIndex.js';
 import { assertPathInsideRoot, assertSafeIoPath } from '../util/security.js';
 import { detectProjectKind, isEngineKind } from '../util/framework.js';
-import { indexGamePngs, matchConnectGlobs, GAME_INDEX_CAP_HINT, connectCapMessage, countingSpritesText, type GameIndex } from '../util/gameScan.js';
-import { collectSourceRelMap, isPathInside, syncDiskPathFromKey } from '../util/syncPath.js';
+import { indexGamePngs, matchConnectGlobs, GAME_INDEX_CAP_HINT, connectCapMessage, countingSpritesText, type GameIndex, type ScanProgress } from '../util/gameScan.js';
+import { aliasCollisionKeys, collectSourceRelMap, isPathInside, syncDiskPathFromKey } from '../util/syncPath.js';
 import { DEFAULT_UNITY_PPU, writeMissingUnityMetas } from '../util/unityMeta.js';
-import { filterUnityManifest } from '../util/unityFilter.js';
+import { applyUnityPullPolicy, isWorkingSetEntry, workingSetPullKeys } from '../util/unityFilter.js';
 import { selectFullSyncOrphans } from '../util/prunePolicy.js';
 import { runTmpJanitor } from '../util/tmpJanitor.js';
 import { friendlyFsError } from '../util/errors.js';
@@ -25,6 +25,7 @@ import { formatBytes } from '../util/format.js';
 import { computePreviousKeyOrphans } from '../util/previousKeyOrphans.js';
 import { cmd } from '../util/invoke.js';
 import { formatWatchSpriteLine } from '../util/watchCopy.js';
+import { shouldPullEntry } from '../util/pullDecision.js';
 import { runPush, type PushSummary } from './push.js';
 
 interface SyncOpts {
@@ -60,9 +61,14 @@ export async function syncCommand(opts: SyncOpts): Promise<void> {
   // never race a concurrent in-flight write. See util/tmpJanitor.ts.
   try {
     const cfg = await loadConfig();
-    await runTmpJanitor(cfg.outDir);
+    try {
+      await runTmpJanitor(cfg.outDir);
+    } catch {
+      /* janitor is best-effort — never let it block a sync */
+    }
+    await ensureEngineConnect(cfg, process.cwd(), !opts.dryRun);
   } catch {
-    /* janitor is best-effort — never let it block a sync */
+    /* missing/invalid config is reported by runOnce / watchLoop */
   }
   if (opts.watch) {
     await watchLoop(opts);
@@ -97,7 +103,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
     }
   }
   const header = await loadWatchHeader(
-    countSpinner ? (n) => { countSpinner!.text = countingSpritesText(n); } : undefined,
+    countSpinner ? (p) => { countSpinner!.text = countingSpritesText(p); } : undefined,
   );
   if (countSpinner) {
     if (header.line) countSpinner.succeed(header.line.trim());
@@ -133,6 +139,11 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
   // tick counts (90 / 300) which made the slowdown timing scale with intervalSec.
   const IDLE_SOFT_BACKOFF_SECONDS = 180;
   const IDLE_HARD_BACKOFF_SECONDS = 900;
+  // Re-walk the game tree on this cadence so new PNGs are ingested without
+  // listing thousands of folders on every 2s tick.
+  const GAME_INDEX_TTL_MS = 30_000;
+  let gameIndexCache = header.gameIndex;
+  let gameIndexAt = Date.now();
 
   // Cancellable idle sleep — `onStopSignal` calls `wakeStop()` so the next
   // tick exits immediately instead of waiting out the full backoff (which can
@@ -148,9 +159,11 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
     stopping = true;
     wakeStop();
     process.stdout.write('\x1b[2K\r');
+    const sig: NodeJS.Signals = signal === 'SIGTERM' ? 'SIGTERM' : 'SIGINT';
     if (inFlight) {
-      console.log(kleur.dim(`Still finishing this check… (${signal} again to stop now)`));
-      process.once(signal, () => process.exit(signal === 'SIGINT' ? 130 : 143));
+      const again = sig === 'SIGINT' ? 'Ctrl+C' : 'SIGTERM';
+      console.log(kleur.dim(`Still finishing this check… (${again} again to stop now)`));
+      process.once(sig, () => process.exit(sig === 'SIGINT' ? 130 : 143));
     } else {
       if (!opts.quiet) console.log(kleur.dim('Stopped watching.'));
       // Preserve any exit code already set by a prior failed tick.
@@ -169,9 +182,21 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
     };
     try {
       onStatus('Checking MagicPixel…');
+      const reuseIndex =
+        gameIndexCache && Date.now() - gameIndexAt < GAME_INDEX_TTL_MS
+          ? gameIndexCache
+          : undefined;
       const r = await runOnce(
         { ...opts, watch: false },
-        { watchMode: true, onStatus, gameIndex: header.gameIndex },
+        {
+          watchMode: true,
+          onStatus,
+          gameIndex: reuseIndex,
+          onGameIndex: (idx) => {
+            gameIndexCache = idx;
+            gameIndexAt = Date.now();
+          },
+        },
       );
       // Reset backoff on any successful tick. Resume message fires once when
       // we recover from an auth pause — `getApiKey()` re-reads
@@ -272,7 +297,6 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
         backoffSec = decision.nextBackoffSec;
       }
     } finally {
-      header.gameIndex = undefined;
       inFlight = false;
     }
   };
@@ -387,10 +411,12 @@ interface RunOpts {
   onStatus?: (msg: string) => void;
   /** Reuse a just-built game index (watch header) so startup doesn't walk twice. */
   gameIndex?: GameIndex;
+  /** Watch loop: persist an index we scanned this tick so later ticks can reuse it. */
+  onGameIndex?: (index: GameIndex) => void;
 }
 
 async function loadWatchHeader(
-  onProgress?: (found: number) => void,
+  onProgress?: (progress: ScanProgress) => void,
 ): Promise<{ line: string | null; gameIndex?: GameIndex }> {
   try {
     const config = await loadConfig();
@@ -433,8 +459,12 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     : null;
   if (!spinner) onStatus?.(since ? 'Checking MagicPixel for edits…' : 'Fetching your sprites from MagicPixel…');
   let manifest: ManifestEntry[];
+  // Capture before the Unity filter drops rows — lastSync must not jump past
+  // an editor save whose `unity` flag was omitted on this tick.
+  let observedUpdatedAt: string | null = null;
   try {
     manifest = await fetchAllManifest(config, since);
+    observedUpdatedAt = maxIsoTimestamp(manifest.map((e) => e.updated_at));
     const projectInfo = getLastProjectInfo();
     const projectSuffix = projectInfo && verbose
       ? kleur.dim(` · project: ${projectInfo.name ?? projectInfo.id.slice(0, 8)}`)
@@ -474,11 +504,23 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   const gameIndex = runOpts.gameIndex
     ?? (isEngineKind(projectKind)
       ? await indexGamePngs(projectKind, process.cwd(), config.outDir, {
-          onProgress: (n) => onStatus?.(`Looking through your game sprites…  ${n.toLocaleString('en-US')}`),
+          onProgress: (p) => {
+            const n = p.pngs.toLocaleString('en-US');
+            const f = p.folders.toLocaleString('en-US');
+            onStatus?.(
+              p.current
+                ? `Looking through your game sprites…  ${n} sprites · ${f} folders  ·  ${p.current}`
+                : p.folders > 0
+                  ? `Looking through your game sprites…  ${n} sprites · ${f} folders`
+                  : `Looking through your game sprites…  ${n}`,
+            );
+          },
         })
       : { files: [], capped: false });
+  if (!runOpts.gameIndex) runOpts.onGameIndex?.(gameIndex);
   const connected = matchConnectGlobs(gameIndex, config.connect ?? []);
   const sourceByKey = collectSourceRelMap(connected.entries, state.synced);
+  aliasCollisionKeys(sourceByKey, manifest.map((e) => e.key));
   if (verbose && gameIndex.capped) {
     console.log(kleur.yellow(`! ${GAME_INDEX_CAP_HINT}`));
   }
@@ -495,6 +537,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   }
   const pathForKey = (key: string): string =>
     syncDiskPathFromKey(config.outDir, key, sourceByKey);
+  const workingSet = workingSetPullKeys(sourceByKey, state.synced);
   // Files whose artboard is no longer flagged for Unity. Deleted even in
   // incremental mode: un-checking the box in the editor must actually remove
   // the sprite from the game project, not leave a stale copy behind.
@@ -505,18 +548,24 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   // response must never delete art from someone's game project.
   const unknownFlagPaths = new Set<string>();
   if (projectKind === 'Unity') {
-    const filtered = filterUnityManifest(manifest, { syncAll: config.unitySyncAll });
+    const filtered = applyUnityPullPolicy(manifest, {
+      syncAll: config.unitySyncAll,
+      alwaysPull: (entry) => isWorkingSetEntry(entry, workingSet),
+    });
     if (filtered.unknown.length > 0) {
-      console.log(
-        kleur.yellow(
-          `! ${filtered.unknown.length} artboard${filtered.unknown.length === 1 ? '' : 's'} came back without a "Sync to Unity" flag — skipped (existing files kept).`,
-        ),
-      );
-      console.log(kleur.dim(`  Fix: re-run \`${cmd('sync')}\` in a moment, or upgrade with \`npm i -D @magicpixelart/cli@latest\`.`));
+      const n = filtered.unknown.length;
+      const msg = `${n} artboard${n === 1 ? '' : 's'} came back without a "Sync to Unity" flag — skipped (existing files kept).`;
+      if (verbose) {
+        console.log(kleur.yellow(`! ${msg}`));
+        console.log(kleur.dim(`  Fix: re-run \`${cmd('sync')}\` in a moment, or upgrade with \`npm i -D @magicpixelart/cli@latest\`.`));
+      } else {
+        onStatus?.(msg);
+      }
     }
     const unknownSet = new Set(filtered.unknown);
+    const pullSet = new Set(filtered.entries);
     for (const entry of manifest) {
-      if (filtered.entries.includes(entry)) continue;
+      if (pullSet.has(entry)) continue;
       const p = pathForKey(entry.key);
       if (unknownSet.has(entry)) {
         unknownFlagPaths.add(p);
@@ -545,7 +594,12 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
         bytesSaved: 0,
         renamed: [],
       };
-      await maybePushLocalSprites(config.push, verbose, gameIndex, live && !!runOpts.watchMode);
+      if (observedUpdatedAt) {
+        const lastSync =
+          state.lastSync && state.lastSync > observedUpdatedAt ? state.lastSync : observedUpdatedAt;
+        await saveState({ ...state, lastSync });
+      }
+      await maybePushLocalSprites(config.push, verbose, gameIndex, live && !!runOpts.watchMode, onStatus);
       return empty;
     }
     const skipped = manifest.length - filtered.entries.length;
@@ -597,12 +651,49 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   const toDownload: ManifestEntry[] = [];
   let bytesSaved = 0;
   let unchanged = 0;
+  const synced = state.synced ?? {};
+  const cloudShaByAssetId = new Map<string, string | 'ambiguous'>();
+  for (const s of Object.values(synced)) {
+    if (!s.assetId || !s.sha256) continue;
+    const prev = cloudShaByAssetId.get(s.assetId);
+    if (prev && prev !== s.sha256) cloudShaByAssetId.set(s.assetId, 'ambiguous');
+    else if (!prev) cloudShaByAssetId.set(s.assetId, s.sha256);
+  }
+  const previousCloudSha = (entry: ManifestEntry): string | undefined => {
+    const direct = synced[entry.key]?.sha256;
+    if (direct) return direct;
+    for (const k of entry.previous_keys ?? []) {
+      const sha = synced[k]?.sha256;
+      if (sha) return sha;
+    }
+    if (entry.asset_id) {
+      const sha = cloudShaByAssetId.get(entry.asset_id);
+      if (sha && sha !== 'ambiguous') return sha;
+    }
+    return undefined;
+  };
   await Promise.all(
     manifest.map((entry) =>
       diffLimit(async () => {
+        const previousCloudSha256 = previousCloudSha(entry);
+        const inWorkingSet = isWorkingSetEntry(entry, workingSet);
+        // Unchanged cloud composite: skip hashing the original PNG (it almost
+        // never matches) unless the file is gone and we need to restore it.
+        if (entry.sha256 && previousCloudSha256 === entry.sha256 && existsSync(pathFor(entry))) {
+          shaByEntryId.set(entry.id, null);
+          unchanged++;
+          if (entry.size_bytes) bytesSaved += entry.size_bytes;
+          return;
+        }
         const localSha = await fileSha256(pathFor(entry));
         shaByEntryId.set(entry.id, localSha);
-        if (entry.sha256 && localSha && entry.sha256 === localSha) {
+        const pull = shouldPullEntry({
+          cloudSha256: entry.sha256,
+          localSha256: localSha,
+          previousCloudSha256,
+          inWorkingSet,
+        });
+        if (!pull) {
           unchanged++;
           if (entry.size_bytes) bytesSaved += entry.size_bytes;
         } else {
@@ -842,16 +933,9 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
             result.unchanged++;
             if (entry.size_bytes) result.bytesSaved += entry.size_bytes;
           } else {
-            if (entry.sha256) {
-              const actual = createHash('sha256').update(bytes).digest('hex');
-              if (actual !== entry.sha256) {
-                throw new Error(
-                  `sha256 mismatch (expected ${entry.sha256.slice(0, 12)}…, got ${actual.slice(0, 12)}…)`,
-                );
-              }
-            }
-            // Wrap any of mkdir/writeFile so the user sees a friendly
-            // multi-line diagnostic instead of a raw `EACCES: permission denied`.
+            // Do not require bytes to match `entry.sha256`. Single-artboard
+            // downloads serve storage_path (so 2048/4096 Unity tiles do not
+            // 546 the isolate); that PNG can differ from a cached composite hash.
             //
             // NOTE: Asset PNGs deliberately use a direct writeFile rather than
             // atomicWrite. Vite's chokidar watcher only suppresses atomic-rename
@@ -1051,7 +1135,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     // rows whose `updated_at` lived in the gap between the manifest snapshot
     // and the next poll (notably when only metadata changed — e.g. artboard
     // renames — and the row updated between fetch start and save).
-    const maxUpdatedAt = maxIsoTimestamp(manifest.map((e) => e.updated_at));
+    const maxUpdatedAt = observedUpdatedAt ?? maxIsoTimestamp(manifest.map((e) => e.updated_at));
     if (maxUpdatedAt) {
       // Take the later of: newest row we saw, or the prior cursor. Never
       // rewind — an incremental sync that returned 0 rows must keep the
@@ -1122,7 +1206,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   }
 
   onStatus?.('Checking your game files…');
-  await maybePushLocalSprites(config.push, verbose, gameIndex, live && !!runOpts.watchMode);
+  await maybePushLocalSprites(config.push, verbose, gameIndex, live && !!runOpts.watchMode, onStatus);
 
   if (result.failed) process.exitCode = 1;
   return result;
@@ -1133,10 +1217,11 @@ async function maybePushLocalSprites(
   verbose: boolean,
   gameIndex?: GameIndex,
   announceErrors = verbose,
+  onStatus?: (msg: string) => void,
 ): Promise<PushSummary | null> {
   if (pushEnabled === false) return null;
   try {
-    return await runPush({ quiet: !verbose, gameIndex });
+    return await runPush({ quiet: !verbose, gameIndex, onStatus });
   } catch (e) {
     if (announceErrors) {
       console.log();

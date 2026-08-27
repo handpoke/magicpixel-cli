@@ -4,7 +4,7 @@
  * globs select a working set; sync writes back to those original paths.
  */
 import { existsSync } from 'node:fs';
-import { readdir } from 'node:fs/promises';
+import { opendir } from 'node:fs/promises';
 import { relative, resolve } from 'node:path';
 import type { ProjectKind } from './framework.js';
 import { isEngineKind, resolveChildDir } from './framework.js';
@@ -25,6 +25,10 @@ export const GAME_SCAN_SKIP_DIRS = new Set([
   'streamingassets',
   'node_modules',
   'magicpixel',
+  'build',
+  'builds',
+  'recordings',
+  'memorycaptures',
 ]);
 
 /**
@@ -35,6 +39,7 @@ export const GAME_SCAN_SKIP_HIDDEN = new Set([
   '.git',
   '.svn',
   '.hg',
+  '.godot',
   '.magicpixel',
   '.vs',
   '.vscode',
@@ -57,9 +62,14 @@ export const GAME_INDEX_CAP_HINT =
 
 export function connectCapMessage(total: number, ingested: number): string {
   return (
-    `${total} PNGs match the working set — ingesting the first ${ingested} (cap ${MAX_GAME_CONNECT}). ` +
-    `Narrow the glob, or add another connect pattern for the rest.`
+    `${total} sprites match — syncing the first ${ingested} (cap ${MAX_GAME_CONNECT}). ` +
+    `Connect a smaller folder if you don't need all of them.`
   );
+}
+
+/** True for a full Unity game project (not an embedded UPM package). */
+function isUnityGameProject(cwd: string, assetRoot: string | null): boolean {
+  return Boolean(assetRoot && existsSync(resolve(cwd, 'ProjectSettings')));
 }
 
 export function gameScanRoot(kind: ProjectKind): string | null {
@@ -119,31 +129,90 @@ function toEntry(abs: string, cwdAbs: string, assetRoot: string | null): GameInd
   return { abs, sourceRel, adoptRel, key: adopted.path.join('/') };
 }
 
+export interface ScanProgress {
+  pngs: number;
+  folders: number;
+  /** cwd-relative folder currently being read. */
+  current?: string;
+}
+
 export interface IndexGamePngsOpts {
-  /** Called as PNGs are discovered. Throttled (~80ms); always fires with the final count. */
-  onProgress?: (found: number) => void;
+  /** Called as folders/PNGs are visited. Throttled (~80ms); always fires with the final counts. */
+  onProgress?: (progress: ScanProgress) => void;
+}
+
+function fmtCount(n: number, noun: string): string {
+  return `${n.toLocaleString('en-US')} ${noun}${n === 1 ? '' : 's'}`;
+}
+
+function shortPath(rel: string): string {
+  const n = rel.replace(/\\/g, '/');
+  if (!n || n === '.') return '';
+  return n.length <= 48 ? n : `…${n.slice(-47)}`;
 }
 
 /** Spinner / status copy while walking the game tree. */
-export function countingSpritesText(found: number): string {
-  return found > 0
-    ? `Counting sprites in your game…  ${found.toLocaleString('en-US')}`
-    : 'Counting sprites in your game…';
+export function countingSpritesText(progress: ScanProgress | number = 0): string {
+  const pngs = typeof progress === 'number' ? progress : progress.pngs;
+  const folders = typeof progress === 'number' ? 0 : progress.folders;
+  const current = typeof progress === 'number' ? undefined : progress.current;
+  if (pngs === 0 && folders === 0 && !current) return 'Counting sprites in your game…';
+  const spriteBit = fmtCount(pngs, 'sprite');
+  const parts = [spriteBit];
+  if (folders > 0) parts.push(fmtCount(folders, 'folder'));
+  const where = current ? shortPath(current) : '';
+  if (where) parts.push(where);
+  return `Counting sprites in your game…  ${parts.join(' · ')}`;
 }
 
-function bindScanProgress(onProgress?: (found: number) => void): (n: number) => void {
+type VisitFn = ((pngs: number, folders: number, current?: string) => void) & {
+  flush?: () => void;
+};
+
+function bindScanProgress(onProgress?: (progress: ScanProgress) => void): VisitFn {
   if (!onProgress) return () => {};
   let lastAt = 0;
-  let lastN = 0;
-  return (n: number) => {
-    if (n === lastN) return;
+  let pending: ScanProgress | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const flush = (p: ScanProgress) => {
+    pending = null;
+    lastAt = Date.now();
+    onProgress(p);
+  };
+
+  const visit: VisitFn = (pngs: number, folders: number, current?: string) => {
+    const next: ScanProgress = { pngs, folders, current };
     const now = Date.now();
-    if (lastN === 0 || now - lastAt >= 80) {
-      lastAt = now;
-      lastN = n;
-      onProgress(n);
+    if (lastAt === 0 || now - lastAt >= 80) {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      flush(next);
+      return;
+    }
+    pending = next;
+    if (!timer) {
+      timer = setTimeout(() => {
+        timer = null;
+        if (pending) flush(pending);
+      }, 80 - (now - lastAt));
+      timer.unref();
     }
   };
+  visit.flush = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (pending) flush(pending);
+  };
+  return visit;
+}
+
+function samePath(a: string, b: string): boolean {
+  return a.replace(/\\/g, '/').toLowerCase() === b.replace(/\\/g, '/').toLowerCase();
 }
 
 /** Walk the engine tree and return index entries. Does not copy files. */
@@ -162,10 +231,16 @@ export async function indexGamePngs(
   const assetRoot = namedRoot ? resolveChildDir(cwd, namedRoot) : null;
 
   const found: string[] = [];
+  const stats = { folders: 0 };
   const io = createLimit(SCAN_WALK_CONCURRENCY);
   const report = bindScanProgress(opts.onProgress);
-  await walkPngs(scanRoot, scanRoot, destNorm, found, MAX_GAME_INDEX + 1, io, report);
-  if (found.length > 0) opts.onProgress?.(found.length);
+  // Full Unity games: walk Assets/ only. Listing the project root waits on
+  // Library/Packages/cloud placeholders and looks hung at "1 folder".
+  const startAt = isUnityGameProject(cwd, assetRoot) ? assetRoot! : scanRoot;
+  const preferFirst = startAt === scanRoot ? assetRoot : null;
+  await walkPngs(startAt, scanRoot, destNorm, found, MAX_GAME_INDEX + 1, io, report, stats, preferFirst);
+  report.flush?.();
+  opts.onProgress?.({ pngs: found.length, folders: stats.folders });
   found.sort((a, b) => a.localeCompare(b));
   const capped = found.length > MAX_GAME_INDEX;
   if (capped) found.length = MAX_GAME_INDEX;
@@ -209,6 +284,64 @@ export function searchGameIndex(index: GameIndex, query: string): GameIndexEntry
   );
 }
 
+function folderLabel(dir: string, root: string): string {
+  return relative(root, dir).replace(/\\/g, '/') || '.';
+}
+
+/**
+ * List one directory. The limiter wraps *only* this listing so a parent does
+ * not hold a slot while waiting on children (that deadlocks wide Unity trees).
+ */
+async function listDir(
+  dir: string,
+  root: string,
+  destNorm: string,
+  out: string[],
+  limit: number,
+  onVisit: VisitFn,
+  stats: { folders: number },
+  preferFirst: string | null,
+  current: string,
+): Promise<{ preferred: string[]; other: string[] }> {
+  const preferred: string[] = [];
+  const other: string[] = [];
+  let dh;
+  try {
+    dh = await opendir(dir);
+  } catch {
+    return { preferred, other };
+  }
+  let lastBeat = Date.now();
+  try {
+    for await (const ent of dh) {
+      if (out.length >= limit) break;
+      const now = Date.now();
+      if (now - lastBeat >= 80) {
+        lastBeat = now;
+        onVisit(out.length, stats.folders, current);
+      }
+      if (shouldSkipDir(ent.name) || ent.isSymbolicLink()) continue;
+      const full = resolve(dir, ent.name);
+      try {
+        assertPathInsideRoot(full, root, 'scan');
+      } catch {
+        continue;
+      }
+      if (ent.isDirectory()) {
+        if (destNorm && full.replace(/\\/g, '/').toLowerCase() === destNorm) continue;
+        if (preferFirst && samePath(full, preferFirst)) preferred.push(full);
+        else other.push(full);
+      } else if (ent.isFile() && ent.name.toLowerCase().endsWith('.png')) {
+        out.push(full);
+        onVisit(out.length, stats.folders, current);
+      }
+    }
+  } catch {
+    /* unreadable mid-listing */
+  }
+  return { preferred, other };
+}
+
 async function walkPngs(
   dir: string,
   root: string,
@@ -216,35 +349,21 @@ async function walkPngs(
   out: string[],
   limit: number,
   io: ReturnType<typeof createLimit>,
-  onFound?: (found: number) => void,
+  onVisit: VisitFn,
+  stats: { folders: number },
+  preferFirst: string | null,
 ): Promise<void> {
   if (out.length >= limit) return;
-  let entries;
-  try {
-    entries = await readdir(dir, { withFileTypes: true });
-  } catch {
-    return;
+  stats.folders++;
+  const current = folderLabel(dir, root);
+  onVisit(out.length, stats.folders, current);
+  const { preferred, other } = await io(() =>
+    listDir(dir, root, destNorm, out, limit, onVisit, stats, preferFirst, current),
+  );
+  if (out.length >= limit) return;
+  for (const d of preferred) {
+    await walkPngs(d, root, destNorm, out, limit, io, onVisit, stats, null);
   }
-  entries.sort((a, b) => a.name.localeCompare(b.name));
-  const subdirs: string[] = [];
-  for (const ent of entries) {
-    if (out.length >= limit) return;
-    if (ent.isSymbolicLink()) continue;
-    const full = resolve(dir, ent.name);
-    try {
-      assertPathInsideRoot(full, root, 'scan');
-    } catch {
-      continue;
-    }
-    if (ent.isDirectory()) {
-      if (shouldSkipDir(ent.name)) continue;
-      if (destNorm && full.replace(/\\/g, '/').toLowerCase() === destNorm) continue;
-      subdirs.push(full);
-    } else if (ent.isFile() && ent.name.toLowerCase().endsWith('.png')) {
-      out.push(full);
-      onFound?.(out.length);
-    }
-  }
-  if (subdirs.length === 0 || out.length >= limit) return;
-  await Promise.all(subdirs.map((d) => io(() => walkPngs(d, root, destNorm, out, limit, io, onFound))));
+  if (other.length === 0 || out.length >= limit) return;
+  await Promise.all(other.map((d) => walkPngs(d, root, destNorm, out, limit, io, onVisit, stats, null)));
 }

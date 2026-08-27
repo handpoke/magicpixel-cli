@@ -23,6 +23,6 @@ export function formatWatchSpriteLine(c: WatchSpriteCounts): string | null {
   if (set > 0 && pulled > 0 && set !== pulled) {
     return `   Sprites:  ${fmt(set)} in your game  ·  ${fmt(pulled)} last pulled from MagicPixel`;
   }
-  if (set > 0) return `   Sprites:  ${fmt(set)} in your working set`;
+  if (set > 0) return `   Sprites:  ${fmt(set)} in your game`;
   return `   Sprites:  ${fmt(pulled)}`;
 }

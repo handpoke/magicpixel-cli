@@ -4,23 +4,30 @@ import { loadConfig, saveConfig } from '../config.js';
 import { assertSafeGlob } from '../util/security.js';
 import { detectProjectKind, isEngineKind } from '../util/framework.js';
 import { indexGamePngs, matchConnectGlobs, GAME_INDEX_CAP_HINT, connectCapMessage, countingSpritesText } from '../util/gameScan.js';
+import { isAllSpritesGlob, nextConnectGlobs } from '../util/engineConnect.js';
 import { cmd } from '../util/invoke.js';
 import { runPush } from './push.js';
 
+/** Plain-language label for a connect glob (`**` is not meaningful to players). */
+export function describeWorkingSet(glob: string): string {
+  return isAllSpritesGlob(glob) ? 'all sprites in your game' : glob.trim();
+}
+
 /**
- * Add a working-set glob and ingest matching game PNGs into Connected.
- * Sync writes edits back to the original files — not a copy under outDir.
+ * Add or narrow a working-set glob, then ingest matching game PNGs.
+ * A specific folder replaces the default `**`. Sync writes edits back to
+ * the original files — not a copy under outDir.
  */
 export async function connectCommand(glob: string): Promise<void> {
   const pattern = assertSafeGlob(glob);
   const config = await loadConfig();
-  const already = config.connect.includes(pattern);
-  if (!already) {
-    config.connect.push(pattern);
+  const next = nextConnectGlobs(config.connect, pattern);
+  const changed =
+    next.length !== config.connect.length || next.some((g, i) => g !== config.connect[i]);
+  if (changed) {
+    config.connect = next;
     await saveConfig(config);
-    console.log(kleur.green(`✓ added connect pattern: ${pattern}`));
-  } else {
-    console.log(kleur.dim(`  connect pattern already present: ${pattern}`));
+    console.log(kleur.green(`✓ now syncing ${describeWorkingSet(pattern)}`));
   }
 
   const kind = await detectProjectKind();
@@ -31,7 +38,7 @@ export async function connectCommand(glob: string): Promise<void> {
 
   const spinner = ora({ text: countingSpritesText(0), spinner: 'dots' }).start();
   const index = await indexGamePngs(kind, process.cwd(), config.outDir, {
-    onProgress: (n) => { spinner.text = countingSpritesText(n); },
+    onProgress: (p) => { spinner.text = countingSpritesText(p); },
   });
   spinner.stop();
   if (index.capped) {
@@ -48,7 +55,7 @@ export async function connectCommand(glob: string): Promise<void> {
   const n = matched.entries.length;
   console.log(
     kleur.dim(
-      `  ${n} sprite${n === 1 ? '' : 's'} in working set (of ${index.files.length} indexed` +
+      `  ${n} sprite${n === 1 ? '' : 's'} to sync (of ${index.files.length} in your game` +
         (matched.capped ? `, ${matched.total} matched` : '') +
         `).`,
     ),

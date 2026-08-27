@@ -12,9 +12,9 @@ describe('formatWatchSpriteLine', () => {
     );
   });
 
-  it('shows the working set when nothing has been pulled yet', () => {
+  it('shows the game sprite count when nothing has been pulled yet', () => {
     expect(formatWatchSpriteLine({ workingSet: 2147, lastPulled: 0 })).toBe(
-      '   Sprites:  2,147 in your working set',
+      '   Sprites:  2,147 in your game',
     );
   });
 
@@ -26,7 +26,7 @@ describe('formatWatchSpriteLine', () => {
 
   it('collapses to one number when they match', () => {
     expect(formatWatchSpriteLine({ workingSet: 469, lastPulled: 469 })).toBe(
-      '   Sprites:  469 in your working set',
+      '   Sprites:  469 in your game',
     );
   });
 });

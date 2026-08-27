@@ -46,6 +46,37 @@ export function collectSourceRelMap(
 }
 
 /**
+ * Ingest appends `-2`, `-3`, … to the *document* slug when the library already
+ * has that name. The live connect index still uses the unsuffixed key, so a
+ * catch-up pull would treat `ground-ice-snow-4/…` as new MagicPixel art and
+ * dump thousands of copies into outDir. Alias those keys onto the original
+ * PNG when the unsuffixed key is already in the working set.
+ */
+export function stripDocCollisionSuffix(key: string): string {
+  const parts = key.split('/');
+  if (parts.length < 2) return key;
+  const docIdx = parts.length - 2;
+  const stripped = parts[docIdx].replace(/-(\d+)$/, '');
+  if (stripped === parts[docIdx]) return key;
+  const next = parts.slice();
+  next[docIdx] = stripped;
+  return next.join('/');
+}
+
+export function aliasCollisionKeys(
+  sourceByKey: Map<string, string>,
+  manifestKeys: Iterable<string>,
+): void {
+  for (const key of manifestKeys) {
+    if (sourceByKey.has(key)) continue;
+    const base = stripDocCollisionSuffix(key);
+    if (base === key) continue;
+    const rel = sourceByKey.get(base);
+    if (rel) sourceByKey.set(key, rel);
+  }
+}
+
+/**
  * When the cloud assigned a different composite key than the index key,
  * push under the cloud key so we update instead of adopting a duplicate.
  */

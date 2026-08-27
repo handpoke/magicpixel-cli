@@ -207,7 +207,7 @@ export async function fetchManifestPage(opts: FetchManifestOpts): Promise<Manife
 }
 
 type RetrySleep = (ms: number) => Promise<void>;
-interface RetryOpts {
+export interface RetryOpts {
   sleep?: RetrySleep;
   /** 546-only attempt cap. Defaults to the same 5 as other 5xx so PNG
    *  downloads don't stall ~30s each during a recycle. Manifest fetches
@@ -419,8 +419,8 @@ export interface PushResult {
 
 }
 
-/** Max sprites the server accepts per request (mirrors MAX_SPRITES_PER_REQUEST). */
-export const PUSH_BATCH_SIZE = 20;
+/** CLI send size. The server allows 20; smaller batches survive Worker 502s. */
+export const PUSH_BATCH_SIZE = 8;
 
 const DEFAULT_INGEST_ENDPOINT = 'https://magicpixel.art/api/public/integration/ingest';
 
@@ -430,7 +430,10 @@ export function resolveIngestEndpoint(): string {
 }
 
 /** Post one batch of sprites. Shares the transient-retry policy with pulls. */
-export async function pushSprites(sprites: PushSprite[]): Promise<PushResult[]> {
+export async function pushSprites(
+  sprites: PushSprite[],
+  retryOpts?: RetryOpts,
+): Promise<PushResult[]> {
   const url = resolveIngestEndpoint();
   return retryTransient('push', async () => {
     const { headers, requestId } = buildHeaders({ 'Content-Type': 'application/json' });
@@ -459,5 +462,42 @@ export async function pushSprites(sprites: PushSprite[]): Promise<PushResult[]> 
       serverRequestId,
       retryAfterMsFromResponse(res),
     );
-  });
+  }, retryOpts);
+}
+
+function isTransientPushError(e: unknown): boolean {
+  return e instanceof ApiError && (e.status >= 500 || e.status === 429);
+}
+
+/**
+ * Push a batch, splitting in half on persistent 502/5xx so one fat request
+ * cannot abort the rest of a connect/sync.
+ */
+export async function pushSpritesAdaptive(
+  sprites: PushSprite[],
+  retryOpts?: RetryOpts,
+): Promise<PushResult[]> {
+  if (sprites.length === 0) return [];
+  try {
+    return await pushSprites(sprites, retryOpts);
+  } catch (e) {
+    if (!isTransientPushError(e)) throw e;
+    if (sprites.length === 1) {
+      return [{ key: sprites[0].key, status: 'error', message: (e as Error).message }];
+    }
+    const mid = Math.ceil(sprites.length / 2);
+    const left = await pushSpritesAdaptive(sprites.slice(0, mid), retryOpts);
+    try {
+      const right = await pushSpritesAdaptive(sprites.slice(mid), retryOpts);
+      return [...left, ...right];
+    } catch (rightErr) {
+      // Left half already landed — don't drop those results when the rest fails.
+      const right = sprites.slice(mid).map((s) => ({
+        key: s.key,
+        status: 'error' as const,
+        message: (rightErr as Error).message,
+      }));
+      return [...left, ...right];
+    }
+  }
 }

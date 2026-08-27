@@ -29,7 +29,7 @@ export async function searchCommand(query: string): Promise<void> {
   }
   const spinner = ora({ text: countingSpritesText(0), spinner: 'dots' }).start();
   const index = await indexGamePngs(kind, process.cwd(), outDir, {
-    onProgress: (n) => { spinner.text = countingSpritesText(n); },
+    onProgress: (p) => { spinner.text = countingSpritesText(p); },
   });
   spinner.stop();
   if (index.capped) {

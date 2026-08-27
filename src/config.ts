@@ -29,8 +29,8 @@ export interface MagicPixelConfig {
   /** Disk → MagicPixel on every `sync`. Set false for pull-only. Default true. */
   push?: boolean;
   /**
-   * Working-set globs (picomatch subset) of game PNGs to adopt into Connected.
-   * Empty means index-only: nothing is ingested until `magicpixel connect`.
+   * Globs of game PNGs to keep in Connected. Unity/Godot/GameMaker default to
+   * all sprites (`**`) on first sync. Narrow with `magicpixel connect <glob>`.
    */
   connect: string[];
 }

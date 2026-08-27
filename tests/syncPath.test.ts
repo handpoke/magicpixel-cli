@@ -3,11 +3,13 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  aliasCollisionKeys,
   collectSourceRelMap,
   isPathInside,
   remapAbsToCloudKeys,
   resolveProjectRel,
   sanitizeSourceRel,
+  stripDocCollisionSuffix,
   syncDiskPathFromKey,
 } from '../src/util/syncPath.js';
 
@@ -66,6 +68,25 @@ describe('collectSourceRelMap', () => {
     );
     expect(map.get('sprites/hero/hero')).toBe('Assets/Sprites/hero.png');
     expect(map.get('sprites/hero/hero-2')).toBe('Assets/Sprites/hero.png');
+  });
+});
+
+describe('aliasCollisionKeys', () => {
+  it('maps an ingest collision slug onto the original game file', () => {
+    expect(stripDocCollisionSuffix('runtime/prebaked/spine/ground-ice-snow-4/ground-ice-snow')).toBe(
+      'runtime/prebaked/spine/ground-ice-snow/ground-ice-snow',
+    );
+    const map = new Map([['runtime/prebaked/spine/ground-ice-snow/ground-ice-snow', 'Assets/Runtime/ground_ice_snow.png']]);
+    aliasCollisionKeys(map, ['runtime/prebaked/spine/ground-ice-snow-4/ground-ice-snow']);
+    expect(map.get('runtime/prebaked/spine/ground-ice-snow-4/ground-ice-snow')).toBe(
+      'Assets/Runtime/ground_ice_snow.png',
+    );
+  });
+
+  it('does not invent a working-set path when the unsuffixed key is absent', () => {
+    const map = new Map<string, string>();
+    aliasCollisionKeys(map, ['sprites/hero-2/hero']);
+    expect(map.size).toBe(0);
   });
 });
 

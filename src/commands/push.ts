@@ -10,11 +10,11 @@
 import kleur from 'kleur';
 import ora from 'ora';
 import { mkdir, readFile, rename } from 'node:fs/promises';
-import { dirname } from 'node:path';
-import { relative, resolve } from 'node:path';
+import { dirname, relative, resolve } from 'node:path';
 
 import { loadConfig, loadState, saveState, type MagicPixelConfig, type SyncState, type SyncedSprite } from '../config.js';
-import { PUSH_BATCH_SIZE, pushSprites, type PushResult, type PushSprite } from '../api.js';
+import { ensureEngineConnect } from '../util/engineConnect.js';
+import { PUSH_BATCH_SIZE, pushSpritesAdaptive, type PushResult, type PushSprite } from '../api.js';
 import { hashFile } from '../util/hash.js';
 import { createLimit } from '../util/limit.js';
 import { assetDiskPathFromKey, walkOutDirPngs } from '../util/paths.js';
@@ -38,6 +38,8 @@ export interface PushOpts {
   quiet?: boolean;
   /** Skip a second game-tree walk when the caller already indexed. */
   gameIndex?: GameIndex;
+  /** Watch-mode status line (hash progress). Ignored when a spinner is shown. */
+  onStatus?: (msg: string) => void;
 }
 
 export interface PushSummary {
@@ -59,7 +61,7 @@ export async function pushCommand(opts: PushOpts = {}): Promise<void> {
  * set is ingested without a second command).
  */
 export async function runPush(opts: PushOpts = {}): Promise<PushSummary> {
-  const config = await loadConfig();
+  const config = await ensureEngineConnect(await loadConfig(), process.cwd(), !opts.dryRun);
   const state = await loadState();
   return runPushWith(config, state, opts);
 }
@@ -77,7 +79,7 @@ export async function runPushWith(
   const index = opts.gameIndex
     ?? (isEngineKind(kind)
       ? await indexGamePngs(kind, process.cwd(), config.outDir, {
-          onProgress: spinner ? (n) => { spinner.text = countingSpritesText(n); } : undefined,
+          onProgress: spinner ? (p) => { spinner.text = countingSpritesText(p); } : undefined,
         })
       : { files: [], capped: false });
   const matched = matchConnectGlobs(index, config.connect ?? []);
@@ -99,11 +101,22 @@ export async function runPushWith(
   const candidates: PushCandidate[] = [];
   const cwdAbs = resolve(process.cwd());
   let skippedUnsafe = 0;
-  const synced = state.synced ?? {};
-  const byRel = indexSyncedBySourceRel(synced);
+  const knownSynced = state.synced ?? {};
+  const byRel = indexSyncedBySourceRel(knownSynced);
   const scan = createLimit(PUSH_SCAN_CONCURRENCY);
+  const toHash = [...absByKey.entries()];
+  let hashed = 0;
+  const reportHash = () => {
+    hashed++;
+    const n = hashed.toLocaleString('en-US');
+    const t = toHash.length.toLocaleString('en-US');
+    if (spinner) spinner.text = `Checking your game files…  ${n} / ${t}`;
+    else if (opts.onStatus && (hashed === 1 || hashed === toHash.length || hashed % 25 === 0)) {
+      opts.onStatus(`Checking your game files…  ${n} / ${t}`);
+    }
+  };
   await Promise.all(
-    [...absByKey.entries()].map(([key, abs]) =>
+    toHash.map(([key, abs]) =>
       scan(async () => {
         try {
           if (!verifiedIoPaths.has(abs)) {
@@ -112,29 +125,34 @@ export async function runPushWith(
           }
         } catch {
           skippedUnsafe++;
+          reportHash();
           return;
         }
         const entry = entryByKey.get(key);
         const sourceRel = entry?.sourceRel ?? sourceByKey.get(key);
-        const stateKey = resolveSyncedKey({ key, sourceRel }, synced, byRel);
-        const known = stateKey ? synced[stateKey] : undefined;
+        const stateKey = resolveSyncedKey({ key, sourceRel }, knownSynced, byRel);
+        const known = stateKey ? knownSynced[stateKey] : undefined;
         const hint =
           known?.diskSha256 && known.diskMtimeMs != null && known.diskSize != null
             ? { sha256: known.diskSha256, mtimeMs: known.diskMtimeMs, size: known.diskSize }
             : undefined;
-        const hashed = await hashFile(abs, hint);
-        if (!hashed) return;
+        const hashedFile = await hashFile(abs, hint);
+        if (!hashedFile) {
+          reportHash();
+          return;
+        }
         const segments = entry
           ? entry.adoptRel.replace(/\.png$/i, '').split('/')
           : key.split('/');
         candidates.push({
           key,
           segments,
-          diskSha256: hashed.sha256,
+          diskSha256: hashedFile.sha256,
           ...(sourceRel ? { sourceRel } : {}),
-          diskMtimeMs: hashed.mtimeMs,
-          diskSize: hashed.size,
+          diskMtimeMs: hashedFile.mtimeMs,
+          diskSize: hashedFile.size,
         });
+        reportHash();
       }),
     ),
   );
@@ -235,47 +253,34 @@ export async function runPushWith(
 
   const progress = quiet ? null : ora(`Pushing 0/${sprites.length}…`).start();
   const results: PushResult[] = [];
-  for (let i = 0; i < sprites.length; i += PUSH_BATCH_SIZE) {
-    const batch = sprites.slice(i, i + PUSH_BATCH_SIZE);
-    const batchResults = await pushSprites(batch);
-    results.push(...batchResults);
-    if (progress) progress.text = `Pushing ${Math.min(i + batch.length, sprites.length)}/${sprites.length}…`;
+  let synced: Record<string, SyncedSprite> = { ...(state.synced ?? {}) };
+  try {
+    for (let i = 0; i < sprites.length; i += PUSH_BATCH_SIZE) {
+      const batch = sprites.slice(i, i + PUSH_BATCH_SIZE);
+      const batchResults = await pushSpritesAdaptive(batch);
+      results.push(...batchResults);
+      synced = await commitPushResults({
+        synced,
+        batchResults,
+        candidates,
+        sourceByKey,
+        shaByKey,
+        fpByKey,
+        outDir: config.outDir,
+      });
+      await saveState({ ...state, synced });
+      if (progress) progress.text = `Pushing ${Math.min(i + batch.length, sprites.length)}/${sprites.length}…`;
+    }
+  } catch (e) {
+    progress?.fail(`Push stopped after ${results.length}/${sprites.length}. ${(e as Error).message}`);
+    if (results.length > 0) await saveState({ ...state, synced });
+    throw e;
   }
 
   const counts = { created: 0, updated: 0, unchanged: 0, conflict: 0, error: 0 };
-  const failedKeys = new Set(
-    results.filter((r) => r.status === 'conflict' || r.status === 'error').map((r) => r.key),
-  );
-  const fingerprinted = applyDiskFingerprints(
-    state.synced ?? {},
-    candidates.filter((c) => !failedKeys.has(c.key)),
-  );
-  const nextSynced: Record<string, SyncedSprite> = { ...fingerprinted.next };
   for (const r of results) {
-    counts[r.status] = (counts[r.status] ?? 0) + 1;
-    const stateKey = r.cloudKey && r.cloudKey !== r.key ? r.cloudKey : r.key;
-    const sourceRel = sourceByKey.get(r.key) ?? sourceByKey.get(stateKey);
-    if (stateKey !== r.key && (r.status === 'created' || r.status === 'updated')) {
-      if (!sourceRel) await renameLocalSprite(config.outDir, r.key, stateKey);
-    }
-    if ((r.status === 'created' || r.status === 'updated' || r.status === 'unchanged') && r.assetId && r.sha256) {
-      if (stateKey !== r.key) delete nextSynced[r.key];
-      const diskSha256 = shaByKey.get(r.key) ?? shaByKey.get(stateKey) ?? nextSynced[stateKey]?.diskSha256;
-      const fp = fpByKey.get(r.key) ?? fpByKey.get(stateKey);
-      nextSynced[stateKey] = {
-        assetId: r.assetId,
-        layerIdx: typeof r.layerIdx === 'number' ? r.layerIdx : (nextSynced[stateKey]?.layerIdx ?? 0),
-        sha256: r.sha256,
-        layers: 1,
-        ...(diskSha256 ? { diskSha256 } : {}),
-        ...(fp?.diskMtimeMs != null ? { diskMtimeMs: fp.diskMtimeMs } : {}),
-        ...(fp?.diskSize != null ? { diskSize: fp.diskSize } : {}),
-        ...(sourceRel ? { sourceRel } : {}),
-      };
-    }
+    if (r.status in counts) counts[r.status as keyof typeof counts]++;
   }
-  await saveState({ ...state, synced: nextSynced });
-
   const failed = counts.conflict + counts.error;
   const summary =
     `created ${counts.created}, updated ${counts.updated}, unchanged ${counts.unchanged}` +
@@ -305,6 +310,50 @@ export async function runPushWith(
   }
   if (failed) process.exitCode = 1;
   return { ...counts, imported: matched.entries.length };
+}
+
+async function commitPushResults(opts: {
+  synced: Record<string, SyncedSprite>;
+  batchResults: PushResult[];
+  candidates: PushCandidate[];
+  sourceByKey: Map<string, string>;
+  shaByKey: Map<string, string>;
+  fpByKey: Map<string, PushCandidate>;
+  outDir: string;
+}): Promise<Record<string, SyncedSprite>> {
+  const { batchResults, candidates, sourceByKey, shaByKey, fpByKey, outDir } = opts;
+  const failedKeys = new Set(
+    batchResults.filter((r) => r.status === 'conflict' || r.status === 'error').map((r) => r.key),
+  );
+  const batchKeys = new Set(batchResults.map((r) => r.key));
+  const fingerprinted = applyDiskFingerprints(
+    opts.synced,
+    candidates.filter((c) => batchKeys.has(c.key) && !failedKeys.has(c.key)),
+  );
+  const nextSynced: Record<string, SyncedSprite> = { ...fingerprinted.next };
+  for (const r of batchResults) {
+    const stateKey = r.cloudKey && r.cloudKey !== r.key ? r.cloudKey : r.key;
+    const sourceRel = sourceByKey.get(r.key) ?? sourceByKey.get(stateKey);
+    if (stateKey !== r.key && (r.status === 'created' || r.status === 'updated')) {
+      if (!sourceRel) await renameLocalSprite(outDir, r.key, stateKey);
+    }
+    if ((r.status === 'created' || r.status === 'updated' || r.status === 'unchanged') && r.assetId && r.sha256) {
+      if (stateKey !== r.key) delete nextSynced[r.key];
+      const diskSha256 = shaByKey.get(r.key) ?? shaByKey.get(stateKey) ?? nextSynced[stateKey]?.diskSha256;
+      const fp = fpByKey.get(r.key) ?? fpByKey.get(stateKey);
+      nextSynced[stateKey] = {
+        assetId: r.assetId,
+        layerIdx: typeof r.layerIdx === 'number' ? r.layerIdx : (nextSynced[stateKey]?.layerIdx ?? 0),
+        sha256: r.sha256,
+        layers: 1,
+        ...(diskSha256 ? { diskSha256 } : {}),
+        ...(fp?.diskMtimeMs != null ? { diskMtimeMs: fp.diskMtimeMs } : {}),
+        ...(fp?.diskSize != null ? { diskSize: fp.diskSize } : {}),
+        ...(sourceRel ? { sourceRel } : {}),
+      };
+    }
+  }
+  return nextSynced;
 }
 
 /** Persist disk sha256 onto existing synced rows so the next scan can skip. */

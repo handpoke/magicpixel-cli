@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.14] — 2026-08-26
+
+### Fixed
+
+- **Watch no longer re-downloads the whole game on catch-up.** Connect
+  originals almost never match MagicPixel's re-encoded composite hash, so
+  comparing those bytes queued ~every PNG (`492/3116…`) and would overwrite
+  the Unity files. Pull now skips a connected sprite unless the cloud
+  composite actually changed (or an editor save cleared the cached hash).
+  Ingest collision slugs (`ground-ice-snow-4`) alias onto the original PNG
+  instead of dumping copies into `Assets/MagicPixel`.
+- **`connect <folder>` actually narrows the default `**` working set.** Adding
+  a folder used to OR with `**` and keep every sprite. `connect '**'` restores
+  all sprites. Godot's `.godot/` import cache is not ingested.
+- **Editor saves of connected sprites still pull when the Unity flag is
+  missing.** A save nulls `artboard_index`; the next manifest often omits
+  `unity`. Watch writes those pixels back to the original game PNG. `lastSync`
+  advances past every row the fetch saw, including skipped drafts.
+- **Watch no longer sits silent on `Checking your game files…`.** After a
+  pull, the upload half hashes local PNGs; the status line now shows
+  `1,200 / 3,126` instead of a frozen timestamp. The game-tree walk is reused
+  for 30s so each 2s poll does not re-list thousands of folders.
+- **Ctrl+C drain message** says `Ctrl+C again` instead of `undefined`.
+- **Single-artboard downloads no longer composite in the edge worker.**
+  Unity ingest sheets (including 2048/4096 tiles) are served from storage
+  so a catch-up download does not 546 the isolate. The CLI writes those
+  bytes even when they differ from a cached composite hash.
+
+## [0.5.13] — 2026-08-26
+
+### Fixed
+
+- **Connect no longer hangs at `0 sprites · 1 folder`.** Full Unity games
+  (`ProjectSettings` present) scan `Assets/` only — listing Library and the
+  rest of the project root blocked the spinner before any sprite was found.
+  Directory reads stream so the path keeps updating (`Assets/Sprites`), and
+  nested walks no longer deadlock on the folder limiter.
+- **Push no longer aborts the rest of a connect on a 502.** Batches of 8
+  (down from 20) persist after each success. A gateway error splits the
+  batch instead of crashing; already-uploaded sprites are remembered so a
+  re-run skips them.
+- **`connect` copy.** Re-running `connect '**'` no longer prints
+  `connect pattern already present: **`. First-time connect says
+  `now syncing all sprites in your game`.
+
+### Changed
+
+- **Unity/Godot/GameMaker default to all game sprites.** `start` and `sync`
+  ingest the game tree without a separate `connect '**'`. Use `connect` only
+  to narrow folders. Daily command is `sync --watch`.
+
+## [0.5.12] — 2026-08-26
+
+### Fixed
+
+- **Watch counting no longer looks hung.** Sprite counting used to stay on
+  `Counting sprites in your game…` with no numbers until the first PNG, which
+  on a large Unity tree can take a long time. The spinner now updates as
+  folders are visited (`0 sprites · 128 folders`) and walks `Assets/` before
+  sibling project folders so the sprite count appears sooner.
+
 ## [0.5.11] — 2026-08-26
 
 ### Changed

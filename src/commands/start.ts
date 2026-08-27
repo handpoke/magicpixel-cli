@@ -25,7 +25,7 @@ interface StartOpts {
  */
 export async function startCommand(opts: StartOpts = {}): Promise<void> {
   console.log(kleur.bold('🪄  MagicPixel — first-run setup'));
-  console.log(kleur.dim('  This links your game project. Sprites are indexed locally; nothing is imported until you connect a working set.'));
+  console.log(kleur.dim('  This links your game project and syncs sprites both ways.'));
   console.log();
 
   const kind = await detectProjectKind();
@@ -116,8 +116,7 @@ export async function startCommand(opts: StartOpts = {}): Promise<void> {
     console.log(`  ${kleur.green('▶')} ${kleur.bold(`${cmd('sync')} --watch`)}   ${kleur.dim('# keeps sprites fresh while you edit them in MagicPixel')}`);
   }
   console.log();
-  console.log(kleur.dim(`  Find sprites with \`${cmd('search')} hero\`, then \`${cmd('connect')} 'assets/Sprites/**'\` to add a working set.`));
-  console.log(kleur.dim('  Connected sprites write back to their original game path. New MagicPixel art lands in outDir.'));
+  console.log(kleur.dim('  Game sprites write back to their original path. New MagicPixel art lands in outDir.'));
   console.log();
   if (await hasDevScript()) {
     const watchCmd = hasWatch ? 'npm run magicpixel:watch' : `${cmd('sync')} --watch`;

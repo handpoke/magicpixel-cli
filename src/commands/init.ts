@@ -17,6 +17,7 @@ import {
 import { assertSafeOutDir } from '../util/security.js';
 import { atomicWrite } from '../util/atomicWrite.js';
 import { cmd } from '../util/invoke.js';
+import { DEFAULT_ENGINE_CONNECT } from '../util/engineConnect.js';
 
 const WATCH_SCRIPT_NAME = 'magicpixel:watch';
 const WATCH_SCRIPT_CMD = 'magicpixel sync --watch';
@@ -40,6 +41,7 @@ export async function initCommand(opts: InitOpts): Promise<void> {
   const kind = await detectProjectKind();
   const suggestedOutDir = suggestOutDir(kind);
   config.outDir = suggestedOutDir;
+  if (isEngineKind(kind)) config.connect = [...DEFAULT_ENGINE_CONNECT];
 
   const pkgExists = hasPackageJson();
   const pkgPath = resolve(process.cwd(), 'package.json');

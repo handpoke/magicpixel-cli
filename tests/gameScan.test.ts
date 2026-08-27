@@ -76,6 +76,25 @@ describe('indexGamePngs', () => {
     expect(existsSync(join(cwd, 'assets', 'MagicPixel'))).toBe(false);
   });
 
+  it('walks only Assets in a Unity game project', async () => {
+    const cwd = tmpProject();
+    mkdirSync(join(cwd, 'Assets', 'Sprites'), { recursive: true });
+    mkdirSync(join(cwd, 'ProjectSettings'), { recursive: true });
+    mkdirSync(join(cwd, 'Editor'), { recursive: true });
+    mkdirSync(join(cwd, 'Builds'), { recursive: true });
+    writeFileSync(join(cwd, 'Assets', 'Sprites', 'hero.png'), png);
+    writeFileSync(join(cwd, 'Editor', 'gizmo.png'), png);
+    writeFileSync(join(cwd, 'Builds', 'bundle.png'), png);
+
+    const seen: string[] = [];
+    const r = await indexGamePngs('Unity', cwd, 'Assets/MagicPixel', {
+      onProgress: (p) => { if (p.current) seen.push(p.current); },
+    });
+    expect(r.files.map((f) => f.sourceRel)).toEqual(['Assets/Sprites/hero.png']);
+    expect(seen.some((c) => c === 'Assets' || c.startsWith('Assets/'))).toBe(true);
+    expect(seen.some((c) => c === 'Editor' || c.startsWith('Builds'))).toBe(false);
+  });
+
   it('does not index a nested MagicPixel outDir', async () => {
     const cwd = tmpProject();
     mkdirSync(join(cwd, 'Assets', 'Sprites'), { recursive: true });
@@ -85,6 +104,17 @@ describe('indexGamePngs', () => {
 
     const r = await indexGamePngs('Unity', cwd, 'Assets/MagicPixel');
     expect(r.files.map((f) => f.key)).toEqual(['sprites/hero/hero']);
+  });
+
+  it('skips Godot imported .godot PNGs', async () => {
+    const cwd = tmpProject();
+    mkdirSync(join(cwd, 'assets', 'Sprites'), { recursive: true });
+    mkdirSync(join(cwd, '.godot', 'imported'), { recursive: true });
+    writeFileSync(join(cwd, 'assets', 'Sprites', 'hero.png'), png);
+    writeFileSync(join(cwd, '.godot', 'imported', 'hero.png'), png);
+
+    const r = await indexGamePngs('Godot', cwd, 'assets/magicpixel');
+    expect(r.files.map((f) => f.sourceRel)).toEqual(['assets/Sprites/hero.png']);
   });
 });
 
@@ -132,22 +162,34 @@ describe('searchGameIndex', () => {
 });
 
 describe('countingSpritesText', () => {
-  it('starts without a count and then includes a running total', () => {
+  it('starts without a count and then includes running totals', () => {
     expect(countingSpritesText(0)).toBe('Counting sprites in your game…');
-    expect(countingSpritesText(2147)).toBe('Counting sprites in your game…  2,147');
+    expect(countingSpritesText({ pngs: 0, folders: 12 })).toBe(
+      'Counting sprites in your game…  0 sprites · 12 folders',
+    );
+    expect(countingSpritesText({ pngs: 2147, folders: 890 })).toBe(
+      'Counting sprites in your game…  2,147 sprites · 890 folders',
+    );
+    expect(countingSpritesText({ pngs: 0, folders: 1, current: 'Assets' })).toBe(
+      'Counting sprites in your game…  0 sprites · 1 folder · Assets',
+    );
+    expect(countingSpritesText(2147)).toBe('Counting sprites in your game…  2,147 sprites');
   });
 });
 
 describe('indexGamePngs progress', () => {
-  it('reports a running found count', async () => {
+  it('reports folder visits before any PNGs are found', async () => {
     const cwd = tmpProject();
+    mkdirSync(join(cwd, 'Assets', 'Empty', 'Nested'), { recursive: true });
     mkdirSync(join(cwd, 'Assets', 'Sprites'), { recursive: true });
     writeFileSync(join(cwd, 'Assets', 'Sprites', 'a.png'), png);
     writeFileSync(join(cwd, 'Assets', 'Sprites', 'b.png'), png);
-    const seen: number[] = [];
-    await indexGamePngs('Unity', cwd, 'Assets/MagicPixel', { onProgress: (n) => seen.push(n) });
-    expect(seen[seen.length - 1]).toBe(2);
-    expect(Math.max(...seen)).toBe(2);
+    const seen: { pngs: number; folders: number }[] = [];
+    await indexGamePngs('Unity', cwd, 'Assets/MagicPixel', { onProgress: (p) => seen.push(p) });
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.some((p) => p.pngs === 0 && p.folders > 0)).toBe(true);
+    expect(seen[seen.length - 1].pngs).toBe(2);
+    expect(seen[seen.length - 1].folders).toBeGreaterThan(0);
   });
 });
 
@@ -157,6 +199,7 @@ describe('GAME_SCAN_SKIP_DIRS', () => {
     expect(GAME_SCAN_SKIP_DIRS.has('packages')).toBe(true);
     expect(GAME_SCAN_SKIP_DIRS.has('temp')).toBe(true);
     expect(GAME_SCAN_SKIP_DIRS.has('magicpixel')).toBe(true);
+    expect(GAME_SCAN_SKIP_DIRS.has('builds')).toBe(true);
   });
 });
 

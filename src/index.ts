@@ -96,7 +96,7 @@ program
 
 program
   .command('sync')
-  .description('Download changed assets from MagicPixel')
+  .description('Two-way sync: pull MagicPixel edits, push your game sprites')
   .option('--no-prune', 'Keep local files not in the manifest (pruning is now on by default)')
   .option('--dry-run', 'Print the plan without writing files')
   .option('--full', 'Ignore lastSync state; re-fetch the full manifest')
@@ -116,7 +116,7 @@ program
 
 program
   .command('connect <glob>')
-  .description('Add a game-sprite glob to the working set and ingest matching PNGs')
+  .description('Limit which game folders sync (default is all sprites)')
   .addHelpText('after', '\nExamples:\n  $ magicpixel connect \'assets/Sprites/Hero/**\'\n  $ magicpixel connect Runtime/UI/hud.png\n')
   .action(wrap("connect", async (glob: string) => connectCommand(glob)));
 

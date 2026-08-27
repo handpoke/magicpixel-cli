@@ -24,14 +24,15 @@ Unity project or UPM package (`Assets`/`assets`, `Editor`/`Runtime`), Godot
 npx @magicpixelart/cli start
 ```
 
-That walks you through everything: detects your framework, writes `magicpixel.json`, prompts for your API key (paste it from [magicpixel.art/settings](https://magicpixel.art/settings) → API Keys), pulls flagged sprites, and indexes game PNGs locally. Nothing is imported into the library until you connect a working set:
+That walks you through everything: detects your engine or framework, writes `magicpixel.json`, prompts for your API key (paste it from [magicpixel.art/settings](https://magicpixel.art/settings) → API Keys), and syncs sprites both ways. Unity, Godot, and GameMaker default to all game PNGs.
+
+Then leave this running while you work:
 
 ```bash
-npx @magicpixelart/cli search hero
-npx @magicpixelart/cli connect 'assets/Sprites/**'
+npx @magicpixelart/cli sync --watch
 ```
 
-Connected sprites write back to their original game path. New MagicPixel-only art still lands in `outDir`.
+After `npm i -D @magicpixelart/cli` you can type `magicpixel sync --watch`. Connected sprites write back to their original game path. New MagicPixel-only art still lands in `outDir`. To sync only some folders: `npx @magicpixelart/cli connect 'assets/Sprites/**'`.
 
 When it finishes:
 
@@ -109,9 +110,9 @@ No bundler config, no runtime, no extra package.
 | `logout` | Remove the stored API key. |
 | `doctor` | Print a one-screen diagnostic — paste it to your AI agent when something breaks. |
 | `repair [--dry-run] [-y]` | Self-heal a broken sync: validate key → quarantine `state.json` → prune empty dirs → full re-sync. |
-| `sync [...flags]` | Fetch manifest, diff against disk, download changed assets, prune orphans. |
-| `push [--dry-run] [--flatten]` | Upload local PNG edits (and the `connect` working set) back to MagicPixel. |
-| `connect <glob>` | Add a game-sprite glob to the working set and ingest matching PNGs. |
+| `sync [...flags]` | Two-way: pull MagicPixel edits and push changed game sprites. |
+| `push [--dry-run] [--flatten]` | Upload local PNG edits (and connected game sprites) back to MagicPixel. |
+| `connect <glob>` | Limit which game folders sync (default is all sprites on Unity/Godot/GameMaker). |
 | `search <query>` | Search indexed game PNGs (no network). |
 | `add <glob>` / `remove <glob>` | Manage `include` patterns. |
 | `list` | Print matching manifest as a table. |
@@ -146,7 +147,7 @@ Sync is built to be cheap: a no-op run is one small manifest request, zero PNG b
 | `outDir`   | `string`   | framework-dependent     | Where PNGs (and `index.ts`) are written.         |
 | `include`  | `string[]` | `["**/*"]`              | Globs (picomatch) matched against `folder/slug`. |
 | `exclude`  | `string[]` | `[]`                    | Globs to exclude.                                |
-| `connect`  | `string[]` | `[]`                    | Working-set globs of game PNGs to adopt into Connected. Empty = index only. |
+| `connect`  | `string[]` | `["**"]` on engines | Game PNG globs to keep in Connected. Empty on JS projects. |
 | `emitIndex`| `boolean`  | `true`                  | Emit `<outDir>/index.ts` with typed asset map.   |
 | `unityPpu` | `number?`  | `32`                    | Unity only: pixels-per-unit in generated `.meta`. |
 | `unitySyncAll` | `boolean?` | `false`             | Unity only: sync every artboard, not just those flagged in the editor. |
