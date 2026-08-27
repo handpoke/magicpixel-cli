@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.10] — 2026-08-26
+
+### Changed
+
+- **Watch header shows the working-set size**, not only the last successful
+  pull. Connecting 2,000+ game sprites no longer prints `Sprites: 469` when
+  `state.json` hasn't caught up yet (`2,147 in your game · 469 last pulled
+  from MagicPixel`).
+- **Watch prints live status** while a tick is in flight (`Checking
+  MagicPixel…`, `Comparing N sprites…`, download progress, `Checking your
+  game files…`) instead of sitting silent on the header until the tick
+  finishes. Idle ticks say `Waiting for edits…`.
+
 ## [0.5.9] — 2026-08-26
 
 ### Security

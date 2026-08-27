@@ -24,6 +24,7 @@ import { maxIsoTimestamp } from '../util/iso.js';
 import { formatBytes } from '../util/format.js';
 import { computePreviousKeyOrphans } from '../util/previousKeyOrphans.js';
 import { cmd } from '../util/invoke.js';
+import { formatWatchSpriteLine } from '../util/watchCopy.js';
 import { runPush, type PushSummary } from './push.js';
 
 interface SyncOpts {
@@ -79,18 +80,29 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
   // covers the bare boolean `-w` form.
   const intervalSec = typeof opts.watch === 'string' ? parseInt(opts.watch, 10) : 2;
 
-  // Header — print once on start. Project/asset count is best-effort; if the
-  // first manifest fetch fails we still want the loop to come up and retry.
-  let headerCount: number | null = null;
-  try {
-    const state = await loadState();
-    headerCount = state.assets ? Object.keys(state.assets).length : null;
-  } catch {
-    // ignore — header is cosmetic
-  }
+  // Header — print once on start. Counts are best-effort; if the first
+  // manifest fetch fails we still want the loop to come up and retry.
   console.log(kleur.bold('👀 MagicPixel watching for changes…'));
   console.log(`   Edit at:  ${kleur.cyan('https://magicpixel.art')}`);
-  if (headerCount !== null) console.log(kleur.dim(`   Sprites:  ${headerCount}`));
+  let countSpinner: Ora | null = null;
+  if (!opts.quiet) {
+    try {
+      const config = await loadConfig();
+      const kind = await detectProjectKind();
+      if (isEngineKind(kind) && (config.connect?.length ?? 0) > 0) {
+        countSpinner = ora({ text: 'Counting sprites in your game…', spinner: 'dots' }).start();
+      }
+    } catch {
+      /* header is cosmetic */
+    }
+  }
+  const spriteLine = await loadWatchSpriteLine();
+  if (countSpinner) {
+    if (spriteLine) countSpinner.succeed(spriteLine.trim());
+    else countSpinner.stop();
+  } else if (spriteLine && !opts.quiet) {
+    console.log(kleur.dim(spriteLine));
+  }
   console.log(kleur.dim(`   Polling:  every ${intervalSec}s (slows when idle)   ·   Stop: Ctrl+C`));
   console.log();
 
@@ -135,10 +147,10 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
     wakeStop();
     process.stdout.write('\x1b[2K\r');
     if (inFlight) {
-      console.log(kleur.dim(`[watch] finishing current sync… (${signal} again to force quit)`));
+      console.log(kleur.dim(`Still finishing this check… (${signal} again to stop now)`));
       process.once(signal, () => process.exit(signal === 'SIGINT' ? 130 : 143));
     } else {
-      if (!opts.quiet) console.log(kleur.dim('[watch] stopped.'));
+      if (!opts.quiet) console.log(kleur.dim('Stopped watching.'));
       // Preserve any exit code already set by a prior failed tick.
       process.exit(process.exitCode ?? 0);
     }
@@ -149,8 +161,13 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
   const tick = async () => {
     if (inFlight || stopping) return;
     inFlight = true;
+    const onStatus = (msg: string) => {
+      if (opts.quiet) return;
+      process.stdout.write(`\r\x1b[2K${kleur.dim(`${timestamp()} ${msg}`)}`);
+    };
     try {
-      const r = await runOnce({ ...opts, watch: false }, { watchMode: true });
+      onStatus('Checking MagicPixel…');
+      const r = await runOnce({ ...opts, watch: false }, { watchMode: true, onStatus });
       // Reset backoff on any successful tick. Resume message fires once when
       // we recover from an auth pause — `getApiKey()` re-reads
       // .magicpixel/credentials on every call, so a `magicpixel login` in
@@ -191,7 +208,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
         );
         printChanges(r, /* indent */ '  ');
       } else {
-        process.stdout.write(`\r\x1b[2K${kleur.dim(`${timestamp()} no changes (${r.unchanged} unchanged)`)}`);
+        process.stdout.write(`\r\x1b[2K${kleur.dim(`${timestamp()} Waiting for edits… (${r.unchanged} up to date)`)}`);
       }
     } catch (e) {
       const err = e as Error;
@@ -274,7 +291,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
     // before we exit — no separate idle-promise dance required.
     await tick();
   }
-  if (!opts.quiet) console.log(kleur.dim('[watch] stopped.'));
+  if (!opts.quiet) console.log(kleur.dim('Stopped watching.'));
   // Preserve any non-zero exit code set by a failed tick — don't mask a
   // download failure with a clean exit just because the user pressed Ctrl+C.
   process.exit(process.exitCode ?? 0);
@@ -360,6 +377,28 @@ interface RunOpts {
   /** True when called from the watch loop — suppresses the verbose body but
    *  not the change list (the loop prints its own header + list). */
   watchMode?: boolean;
+  /** Carriage-return status for long watch ticks (manifest, downloads, push). */
+  onStatus?: (msg: string) => void;
+}
+
+async function loadWatchSpriteLine(): Promise<string | null> {
+  try {
+    const config = await loadConfig();
+    const state = await loadState();
+    const lastPulled = state.assets ? Object.keys(state.assets).length : 0;
+    let workingSet = 0;
+    const kind = await detectProjectKind();
+    if (isEngineKind(kind) && (config.connect?.length ?? 0) > 0) {
+      const index = await indexGamePngs(kind, process.cwd(), config.outDir);
+      const matched = matchConnectGlobs(index, config.connect);
+      workingSet = matched.total;
+    } else if (state.synced) {
+      workingSet = Object.keys(state.synced).length;
+    }
+    return formatWatchSpriteLine({ workingSet, lastPulled });
+  } catch {
+    return null;
+  }
 }
 
 async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResult> {
@@ -368,6 +407,8 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   const startedAt = new Date().toISOString();
   const concurrency = Math.max(1, Math.min(opts.concurrency ?? 6, 16));
   const verbose = !opts.quiet && !runOpts.watchMode;
+  const live = !opts.quiet;
+  const onStatus = runOpts.onStatus;
   const shouldPrune = opts.prune !== false;  // commander: --no-prune sets false
 
   if (verbose && config.endpoint) {
@@ -380,6 +421,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   const spinner: Ora | null = verbose
     ? ora(since ? `Fetching manifest since ${humanTime(since)}…` : 'Fetching manifest…').start()
     : null;
+  if (!spinner) onStatus?.(since ? 'Checking MagicPixel for edits…' : 'Fetching your sprites from MagicPixel…');
   let manifest: ManifestEntry[];
   try {
     manifest = await fetchAllManifest(config, since);
@@ -417,6 +459,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   // Unity projects sync only the artboards flagged "Sync to Unity" in the
   // editor (parity with the in-app sync button). `unitySyncAll: true` in
   // magicpixel.json opts back into everything.
+  onStatus?.('Looking through your game sprites…');
   const projectKind = await detectProjectKind();
   const gameIndex = isEngineKind(projectKind)
     ? await indexGamePngs(projectKind, process.cwd(), config.outDir)
@@ -489,7 +532,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
         bytesSaved: 0,
         renamed: [],
       };
-      await maybePushLocalSprites(config.push, verbose, gameIndex);
+      await maybePushLocalSprites(config.push, verbose, gameIndex, live && !!runOpts.watchMode);
       return empty;
     }
     const skipped = manifest.length - filtered.entries.length;
@@ -531,6 +574,11 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   // the dominant wall-clock cost of an incremental sync. We cache each result
   // so the download loop can reuse it for `If-None-Match` ETags instead of
   // re-hashing the same file moments later.
+  onStatus?.(
+    manifest.length > 0
+      ? `Comparing ${manifest.length.toLocaleString('en-US')} sprite${manifest.length === 1 ? '' : 's'} with files on disk…`
+      : 'Checking MagicPixel…',
+  );
   const diffLimit = createLimit(concurrency);
   const shaByEntryId = new Map<string, string | null>();
   const toDownload: ManifestEntry[] = [];
@@ -752,7 +800,8 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   };
 
   let progress: Ora | null = null;
-  if (verbose && toDownload.length > 0) {
+  if (live && toDownload.length > 0) {
+    onStatus?.(`Pulling ${toDownload.length.toLocaleString('en-US')} updated sprite${toDownload.length === 1 ? '' : 's'}…`);
     progress = ora({ text: progressText(0, toDownload.length, 0), spinner: 'dots' }).start();
   }
 
@@ -841,8 +890,13 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   );
   const downloaded = result.added.length + result.modified.length;
   if (progress) {
-    if (result.failed === 0) progress.succeed(`Downloaded ${downloaded} (${formatBytes(result.bytesIn)})`);
-    else progress.warn(`Downloaded ${downloaded}, failed ${result.failed} (${formatBytes(result.bytesIn)})`);
+    if (runOpts.watchMode) {
+      progress.stop();
+    } else if (result.failed === 0) {
+      progress.succeed(`Downloaded ${downloaded} (${formatBytes(result.bytesIn)})`);
+    } else {
+      progress.warn(`Downloaded ${downloaded}, failed ${result.failed} (${formatBytes(result.bytesIn)})`);
+    }
   }
 
   // Unity: write pixel-art-correct `.meta` sidecars so sprites import with
@@ -1054,7 +1108,8 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     if (renamed.length > 0) printRenames(renamed, { withHints: true });
   }
 
-  await maybePushLocalSprites(config.push, verbose, gameIndex);
+  onStatus?.('Checking your game files…');
+  await maybePushLocalSprites(config.push, verbose, gameIndex, live && !!runOpts.watchMode);
 
   if (result.failed) process.exitCode = 1;
   return result;
@@ -1064,14 +1119,15 @@ async function maybePushLocalSprites(
   pushEnabled: boolean | undefined,
   verbose: boolean,
   gameIndex?: GameIndex,
+  announceErrors = verbose,
 ): Promise<PushSummary | null> {
   if (pushEnabled === false) return null;
   try {
     return await runPush({ quiet: !verbose, gameIndex });
   } catch (e) {
-    if (verbose) {
+    if (announceErrors) {
       console.log();
-      console.log(kleur.yellow(`! could not push working-set sprites into MagicPixel: ${(e as Error).message}`));
+      console.log(kleur.yellow(`! could not update MagicPixel from your game files: ${(e as Error).message}`));
       console.log(kleur.dim(`  Fix: run \`${cmd('push')}\` once the connection is healthy.`));
     }
     return null;
