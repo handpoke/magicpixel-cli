@@ -119,11 +119,39 @@ function toEntry(abs: string, cwdAbs: string, assetRoot: string | null): GameInd
   return { abs, sourceRel, adoptRel, key: adopted.path.join('/') };
 }
 
+export interface IndexGamePngsOpts {
+  /** Called as PNGs are discovered. Throttled (~80ms); always fires with the final count. */
+  onProgress?: (found: number) => void;
+}
+
+/** Spinner / status copy while walking the game tree. */
+export function countingSpritesText(found: number): string {
+  return found > 0
+    ? `Counting sprites in your game…  ${found.toLocaleString('en-US')}`
+    : 'Counting sprites in your game…';
+}
+
+function bindScanProgress(onProgress?: (found: number) => void): (n: number) => void {
+  if (!onProgress) return () => {};
+  let lastAt = 0;
+  let lastN = 0;
+  return (n: number) => {
+    if (n === lastN) return;
+    const now = Date.now();
+    if (lastN === 0 || now - lastAt >= 80) {
+      lastAt = now;
+      lastN = n;
+      onProgress(n);
+    }
+  };
+}
+
 /** Walk the engine tree and return index entries. Does not copy files. */
 export async function indexGamePngs(
   kind: ProjectKind,
   cwd: string = process.cwd(),
   outDir: string = '',
+  opts: IndexGamePngsOpts = {},
 ): Promise<GameIndex> {
   const empty: GameIndex = { files: [], capped: false };
   if (!isEngineKind(kind)) return empty;
@@ -135,7 +163,9 @@ export async function indexGamePngs(
 
   const found: string[] = [];
   const io = createLimit(SCAN_WALK_CONCURRENCY);
-  await walkPngs(scanRoot, scanRoot, destNorm, found, MAX_GAME_INDEX + 1, io);
+  const report = bindScanProgress(opts.onProgress);
+  await walkPngs(scanRoot, scanRoot, destNorm, found, MAX_GAME_INDEX + 1, io, report);
+  if (found.length > 0) opts.onProgress?.(found.length);
   found.sort((a, b) => a.localeCompare(b));
   const capped = found.length > MAX_GAME_INDEX;
   if (capped) found.length = MAX_GAME_INDEX;
@@ -186,6 +216,7 @@ async function walkPngs(
   out: string[],
   limit: number,
   io: ReturnType<typeof createLimit>,
+  onFound?: (found: number) => void,
 ): Promise<void> {
   if (out.length >= limit) return;
   let entries;
@@ -211,8 +242,9 @@ async function walkPngs(
       subdirs.push(full);
     } else if (ent.isFile() && ent.name.toLowerCase().endsWith('.png')) {
       out.push(full);
+      onFound?.(out.length);
     }
   }
   if (subdirs.length === 0 || out.length >= limit) return;
-  await Promise.all(subdirs.map((d) => io(() => walkPngs(d, root, destNorm, out, limit, io))));
+  await Promise.all(subdirs.map((d) => io(() => walkPngs(d, root, destNorm, out, limit, io, onFound))));
 }

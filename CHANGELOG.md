@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.11] — 2026-08-26
+
+### Changed
+
+- **Sprite counting shows a running total** (`Counting sprites in your
+  game…  1,247`) while walking the project, and watch reuses that first
+  scan so startup does not walk the tree twice.
+
 ## [0.5.10] — 2026-08-26
 
 ### Changed

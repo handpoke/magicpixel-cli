@@ -10,6 +10,7 @@ import {
   indexGamePngs,
   matchConnectGlobs,
   searchGameIndex,
+  countingSpritesText,
 } from '../src/util/gameScan.js';
 
 const png = Buffer.from(
@@ -127,6 +128,26 @@ describe('searchGameIndex', () => {
     const index = await indexGamePngs('Unity', cwd, 'Assets/MagicPixel');
     expect(searchGameIndex(index, 'hero').map((e) => e.sourceRel)).toEqual(['Assets/Sprites/hero.png']);
     expect(searchGameIndex(index, 'nope')).toEqual([]);
+  });
+});
+
+describe('countingSpritesText', () => {
+  it('starts without a count and then includes a running total', () => {
+    expect(countingSpritesText(0)).toBe('Counting sprites in your game…');
+    expect(countingSpritesText(2147)).toBe('Counting sprites in your game…  2,147');
+  });
+});
+
+describe('indexGamePngs progress', () => {
+  it('reports a running found count', async () => {
+    const cwd = tmpProject();
+    mkdirSync(join(cwd, 'Assets', 'Sprites'), { recursive: true });
+    writeFileSync(join(cwd, 'Assets', 'Sprites', 'a.png'), png);
+    writeFileSync(join(cwd, 'Assets', 'Sprites', 'b.png'), png);
+    const seen: number[] = [];
+    await indexGamePngs('Unity', cwd, 'Assets/MagicPixel', { onProgress: (n) => seen.push(n) });
+    expect(seen[seen.length - 1]).toBe(2);
+    expect(Math.max(...seen)).toBe(2);
   });
 });
 

@@ -1,8 +1,9 @@
 import kleur from 'kleur';
+import ora from 'ora';
 import { loadConfig, saveConfig } from '../config.js';
 import { assertSafeGlob } from '../util/security.js';
 import { detectProjectKind, isEngineKind } from '../util/framework.js';
-import { indexGamePngs, matchConnectGlobs, GAME_INDEX_CAP_HINT, connectCapMessage } from '../util/gameScan.js';
+import { indexGamePngs, matchConnectGlobs, GAME_INDEX_CAP_HINT, connectCapMessage, countingSpritesText } from '../util/gameScan.js';
 import { cmd } from '../util/invoke.js';
 import { runPush } from './push.js';
 
@@ -28,7 +29,11 @@ export async function connectCommand(glob: string): Promise<void> {
     return;
   }
 
-  const index = await indexGamePngs(kind, process.cwd(), config.outDir);
+  const spinner = ora({ text: countingSpritesText(0), spinner: 'dots' }).start();
+  const index = await indexGamePngs(kind, process.cwd(), config.outDir, {
+    onProgress: (n) => { spinner.text = countingSpritesText(n); },
+  });
+  spinner.stop();
   if (index.capped) {
     console.log(kleur.yellow(`! ${GAME_INDEX_CAP_HINT}`));
   }

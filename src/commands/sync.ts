@@ -13,7 +13,7 @@ import { createLimit } from '../util/limit.js';
 import { emitTypedIndex, ensureAgentsDoc, scanDiskAssets } from '../util/emitIndex.js';
 import { assertPathInsideRoot, assertSafeIoPath } from '../util/security.js';
 import { detectProjectKind, isEngineKind } from '../util/framework.js';
-import { indexGamePngs, matchConnectGlobs, GAME_INDEX_CAP_HINT, connectCapMessage, type GameIndex } from '../util/gameScan.js';
+import { indexGamePngs, matchConnectGlobs, GAME_INDEX_CAP_HINT, connectCapMessage, countingSpritesText, type GameIndex } from '../util/gameScan.js';
 import { collectSourceRelMap, isPathInside, syncDiskPathFromKey } from '../util/syncPath.js';
 import { DEFAULT_UNITY_PPU, writeMissingUnityMetas } from '../util/unityMeta.js';
 import { filterUnityManifest } from '../util/unityFilter.js';
@@ -90,18 +90,20 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
       const config = await loadConfig();
       const kind = await detectProjectKind();
       if (isEngineKind(kind) && (config.connect?.length ?? 0) > 0) {
-        countSpinner = ora({ text: 'Counting sprites in your game…', spinner: 'dots' }).start();
+        countSpinner = ora({ text: countingSpritesText(0), spinner: 'dots' }).start();
       }
     } catch {
       /* header is cosmetic */
     }
   }
-  const spriteLine = await loadWatchSpriteLine();
+  const header = await loadWatchHeader(
+    countSpinner ? (n) => { countSpinner!.text = countingSpritesText(n); } : undefined,
+  );
   if (countSpinner) {
-    if (spriteLine) countSpinner.succeed(spriteLine.trim());
+    if (header.line) countSpinner.succeed(header.line.trim());
     else countSpinner.stop();
-  } else if (spriteLine && !opts.quiet) {
-    console.log(kleur.dim(spriteLine));
+  } else if (header.line && !opts.quiet) {
+    console.log(kleur.dim(header.line));
   }
   console.log(kleur.dim(`   Polling:  every ${intervalSec}s (slows when idle)   ·   Stop: Ctrl+C`));
   console.log();
@@ -167,7 +169,10 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
     };
     try {
       onStatus('Checking MagicPixel…');
-      const r = await runOnce({ ...opts, watch: false }, { watchMode: true, onStatus });
+      const r = await runOnce(
+        { ...opts, watch: false },
+        { watchMode: true, onStatus, gameIndex: header.gameIndex },
+      );
       // Reset backoff on any successful tick. Resume message fires once when
       // we recover from an auth pause — `getApiKey()` re-reads
       // .magicpixel/credentials on every call, so a `magicpixel login` in
@@ -267,6 +272,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
         backoffSec = decision.nextBackoffSec;
       }
     } finally {
+      header.gameIndex = undefined;
       inFlight = false;
     }
   };
@@ -379,25 +385,29 @@ interface RunOpts {
   watchMode?: boolean;
   /** Carriage-return status for long watch ticks (manifest, downloads, push). */
   onStatus?: (msg: string) => void;
+  /** Reuse a just-built game index (watch header) so startup doesn't walk twice. */
+  gameIndex?: GameIndex;
 }
 
-async function loadWatchSpriteLine(): Promise<string | null> {
+async function loadWatchHeader(
+  onProgress?: (found: number) => void,
+): Promise<{ line: string | null; gameIndex?: GameIndex }> {
   try {
     const config = await loadConfig();
     const state = await loadState();
     const lastPulled = state.assets ? Object.keys(state.assets).length : 0;
     let workingSet = 0;
+    let gameIndex: GameIndex | undefined;
     const kind = await detectProjectKind();
     if (isEngineKind(kind) && (config.connect?.length ?? 0) > 0) {
-      const index = await indexGamePngs(kind, process.cwd(), config.outDir);
-      const matched = matchConnectGlobs(index, config.connect);
-      workingSet = matched.total;
+      gameIndex = await indexGamePngs(kind, process.cwd(), config.outDir, { onProgress });
+      workingSet = matchConnectGlobs(gameIndex, config.connect).total;
     } else if (state.synced) {
       workingSet = Object.keys(state.synced).length;
     }
-    return formatWatchSpriteLine({ workingSet, lastPulled });
+    return { line: formatWatchSpriteLine({ workingSet, lastPulled }), gameIndex };
   } catch {
-    return null;
+    return { line: null };
   }
 }
 
@@ -461,9 +471,12 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   // magicpixel.json opts back into everything.
   onStatus?.('Looking through your game sprites…');
   const projectKind = await detectProjectKind();
-  const gameIndex = isEngineKind(projectKind)
-    ? await indexGamePngs(projectKind, process.cwd(), config.outDir)
-    : { files: [], capped: false };
+  const gameIndex = runOpts.gameIndex
+    ?? (isEngineKind(projectKind)
+      ? await indexGamePngs(projectKind, process.cwd(), config.outDir, {
+          onProgress: (n) => onStatus?.(`Looking through your game sprites…  ${n.toLocaleString('en-US')}`),
+        })
+      : { files: [], capped: false });
   const connected = matchConnectGlobs(gameIndex, config.connect ?? []);
   const sourceByKey = collectSourceRelMap(connected.entries, state.synced);
   if (verbose && gameIndex.capped) {

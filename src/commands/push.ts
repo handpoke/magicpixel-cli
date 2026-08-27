@@ -21,7 +21,7 @@ import { assetDiskPathFromKey, walkOutDirPngs } from '../util/paths.js';
 import { applyDiskFingerprints, indexSyncedBySourceRel, planPush, resolveSyncedKey, type PushCandidate } from '../util/pushPlan.js';
 import { cmd } from '../util/invoke.js';
 import { detectProjectKind, isEngineKind } from '../util/framework.js';
-import { indexGamePngs, matchConnectGlobs, GAME_INDEX_CAP_HINT, connectCapMessage, type GameIndex } from '../util/gameScan.js';
+import { indexGamePngs, matchConnectGlobs, GAME_INDEX_CAP_HINT, connectCapMessage, countingSpritesText, type GameIndex } from '../util/gameScan.js';
 import { collectSourceRelMap, remapAbsToCloudKeys } from '../util/syncPath.js';
 import { assertSafeIoPath } from '../util/security.js';
 
@@ -72,11 +72,13 @@ export async function runPushWith(
   const quiet = opts.quiet === true;
   const empty: PushSummary = { created: 0, updated: 0, unchanged: 0, conflict: 0, error: 0, imported: 0 };
 
-  const spinner = quiet ? null : ora('Scanning local sprites…').start();
+  const spinner = quiet ? null : ora(countingSpritesText(0)).start();
   const kind = await detectProjectKind();
   const index = opts.gameIndex
     ?? (isEngineKind(kind)
-      ? await indexGamePngs(kind, process.cwd(), config.outDir)
+      ? await indexGamePngs(kind, process.cwd(), config.outDir, {
+          onProgress: spinner ? (n) => { spinner.text = countingSpritesText(n); } : undefined,
+        })
       : { files: [], capped: false });
   const matched = matchConnectGlobs(index, config.connect ?? []);
   const sourceByKey = collectSourceRelMap(matched.entries, state.synced);
