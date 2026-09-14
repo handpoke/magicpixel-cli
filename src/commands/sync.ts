@@ -24,7 +24,7 @@ import { maxIsoTimestamp } from '../util/iso.js';
 import { formatBytes } from '../util/format.js';
 import { computePreviousKeyOrphans } from '../util/previousKeyOrphans.js';
 import { cmd } from '../util/invoke.js';
-import { formatWatchSpriteLine } from '../util/watchCopy.js';
+import { formatSlowTickLine, formatWatchSpriteLine, SLOW_TICK_HEARTBEAT_MS } from '../util/watchCopy.js';
 import { decidePull } from '../util/pullDecision.js';
 import { hasUnpushedLocalEdit } from '../util/localEdit.js';
 import { shouldReconcile } from '../util/reconcile.js';
@@ -216,8 +216,25 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
       if (opts.quiet) return;
       process.stdout.write(`\r\x1b[2K${kleur.dim(`${timestamp()} ${msg}`)}`);
     };
+    // Heartbeat: a tick that legitimately takes minutes (huge first pull, slow
+    // link) must not look like the silent hang a timeout-less fetch used to
+    // cause. Requests now have deadlines, so a live counter here means "slow",
+    // not "stuck".
+    const tickStartedAt = Date.now();
+    let lastStatus = '';
+    const wrappedStatus = (msg: string) => {
+      lastStatus = msg;
+      onStatus(msg);
+    };
+    const heartbeat = opts.quiet
+      ? null
+      : setInterval(() => {
+          const elapsedSec = Math.round((Date.now() - tickStartedAt) / 1000);
+          onStatus(formatSlowTickLine(elapsedSec, lastStatus));
+        }, SLOW_TICK_HEARTBEAT_MS);
+    heartbeat?.unref?.();
     try {
-      onStatus('Checking MagicPixel…');
+      wrappedStatus('Checking MagicPixel…');
       const reuseIndex =
         gameIndexCache && Date.now() - gameIndexAt < GAME_INDEX_TTL_MS
           ? gameIndexCache
@@ -226,7 +243,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
         { ...opts, watch: false },
         {
           watchMode: true,
-          onStatus,
+          onStatus: wrappedStatus,
           gameIndex: reuseIndex,
           onGameIndex: (idx) => {
             gameIndexCache = idx;
@@ -333,6 +350,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
         backoffSec = decision.nextBackoffSec;
       }
     } finally {
+      if (heartbeat) clearInterval(heartbeat);
       inFlight = false;
     }
   };
@@ -521,8 +539,15 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   // Capture before the Unity filter drops rows — lastSync must not jump past
   // an editor save whose `unity` flag was omitted on this tick.
   let observedUpdatedAt: string | null = null;
+  // Page-by-page progress: a first pull of thousands of sprites walks several
+  // pages, and a single static status line reads as a hang.
+  const onManifestProgress = (n: number) => {
+    const count = n.toLocaleString('en-US');
+    if (spinner) spinner.text = `Fetching manifest… (${count})`;
+    else onStatus?.(`Fetching your sprites from MagicPixel… (${count})`);
+  };
   try {
-    let snapshot = await fetchManifestSnapshot(config, since);
+    let snapshot = await fetchManifestSnapshot(config, since, onManifestProgress);
     if (snapshot.removalsTruncated && since) {
       // The server couldn't list every removal in this window. Trusting the
       // partial list and advancing the cursor would strand the rest forever, so
@@ -531,7 +556,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
         console.log(kleur.dim('Many sprites were removed at once — re-reading the full manifest to stay in sync.'));
       }
       since = undefined;
-      snapshot = await fetchManifestSnapshot(config, undefined);
+      snapshot = await fetchManifestSnapshot(config, undefined, onManifestProgress);
     }
     manifest = snapshot.entries;
     removedRemoteKeys = snapshot.removedKeys;

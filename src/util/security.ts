@@ -108,13 +108,59 @@ export function tmpPathFor(diskPath: string): string {
 }
 
 /**
- * Follow redirects only within the same origin as the initial request (prevents API key leak).
+ * Deadline for a single request (JSON APIs: manifest, push, whoami, key
+ * validation). Without a deadline a stalled socket — sleeping laptop, dropped
+ * Wi-Fi, dead keep-alive connection — makes `fetch` hang forever, so
+ * `sync --watch` sits silently on one tick and never retries.
  */
-export async function safeFetch(url: string, init: RequestInit = {}): Promise<Response> {
+export const REQUEST_TIMEOUT_MS = 45_000;
+
+/** Deadline for a PNG body, which can legitimately take much longer. */
+export const ASSET_TIMEOUT_MS = 120_000;
+
+export interface SafeFetchOpts {
+  /** Per-hop deadline in ms. Ignored when the caller supplies `init.signal`. */
+  timeoutMs?: number;
+}
+
+function isAbortError(err: unknown): boolean {
+  const name = (err as { name?: string } | null)?.name;
+  return name === 'AbortError' || name === 'TimeoutError';
+}
+
+/**
+ * Follow redirects only within the same origin as the initial request (prevents API key leak).
+ *
+ * Each hop gets a fresh deadline. The signal stays armed after the response
+ * headers arrive, so a stalled *body* read aborts too — that abort surfaces
+ * raw here and is relabelled as a transient network failure by `retryTransient`
+ * one layer up; only the connection attempt gets the friendly "didn't respond
+ * in time" wording. Callers that pass their own `init.signal` own their timing
+ * (e.g. `doctor`'s 5s probe).
+ */
+export async function safeFetch(
+  url: string,
+  init: RequestInit = {},
+  opts: SafeFetchOpts = {},
+): Promise<Response> {
   const origin = new URL(url).origin;
+  const timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS;
   let current = url;
   for (let hop = 0; hop < 5; hop++) {
-    const res = await fetch(current, { ...init, redirect: 'manual' });
+    const signal = init.signal ?? AbortSignal.timeout(timeoutMs);
+    let res: Response;
+    try {
+      res = await fetch(current, { ...init, signal, redirect: 'manual' });
+    } catch (e) {
+      if (!init.signal && isAbortError(e)) {
+        throw new Error(
+          `timed out after ${Math.round(timeoutMs / 1000)}s — MagicPixel didn't respond in time.\n` +
+            `  Fix: check your internet connection and that the MagicPixel API is reachable.`,
+          { cause: e },
+        );
+      }
+      throw e;
+    }
     // 304 lives in the 3xx range but is a conditional-request answer, not a
     // redirect: it carries no Location and callers handle it directly.
     if (res.status < 300 || res.status >= 400 || res.status === 304) return res;

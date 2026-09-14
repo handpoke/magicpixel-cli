@@ -26,3 +26,25 @@ export function formatWatchSpriteLine(c: WatchSpriteCounts): string | null {
   if (set > 0) return `   Sprites:  ${fmt(set)} in your game`;
   return `   Sprites:  ${fmt(pulled)}`;
 }
+
+/** How long a single watch tick may run before the heartbeat starts printing. */
+export const SLOW_TICK_HEARTBEAT_MS = 60_000;
+
+/**
+ * Heartbeat line for a tick that has outlived `SLOW_TICK_HEARTBEAT_MS`. Keeps
+ * the last status text so the user sees *what* is slow, not just that
+ * something is. Requests carry their own deadlines, so this always means slow.
+ */
+export function formatSlowTickLine(elapsedSec: number, lastStatus?: string): string {
+  const secs = Math.max(0, Math.round(elapsedSec));
+  const elapsed = secs >= 120 ? `${Math.round(secs / 60)}m` : `${secs}s`;
+  // "Fetching sprites… (1,200)" → "Fetching sprites (1,200)": the ellipsis and
+  // the heartbeat suffix would otherwise both claim the end of the line.
+  const what = lastStatus
+    ?.trim()
+    .replace(/[.…]+(\s*\([^()]*\))?$/, '$1')
+    .trim();
+  return what
+    ? `${what} — still working (${elapsed})`
+    : `Still working (${elapsed})`;
+}

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.21] — 2026-09-14
+
+- `sync --watch` can no longer hang forever: every network request now has a
+  deadline (45s for manifest/JSON calls, 120s for sprite downloads and pushes),
+  and a stalled request is retried like any other network blip.
+- A slow tick prints a heartbeat with elapsed time instead of a frozen line, and
+  the first big pull reports its running sprite count page by page.
+- Timeout errors now end with a "check your internet connection" hint, matching
+  every other CLI error.
+- The heartbeat line no longer prints a stray ellipsis before the sprite count.
+
 ## 0.5.20
 
 - `sync` no longer deletes a PNG that was edited in your project when the sprite

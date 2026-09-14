@@ -1,5 +1,6 @@
 import { resolveEndpoint, getApiKey, CLI_VERSION, type MagicPixelConfig } from './config.js';
 import {
+  ASSET_TIMEOUT_MS,
   etagForSha256,
   MAX_ASSET_BYTES,
   readBodyWithLimit,
@@ -389,10 +390,16 @@ export interface ManifestSnapshot {
   removalsTruncated: boolean;
 }
 
-/** Full manifest walk, including the cloud's removal list. */
+/**
+ * Full manifest walk, including the cloud's removal list.
+ *
+ * `onProgress` fires after each page with the running entry count, so a big
+ * first pull shows movement instead of one frozen status line.
+ */
 export async function fetchManifestSnapshot(
   config: MagicPixelConfig,
   since?: string,
+  onProgress?: (entriesSoFar: number) => void,
 ): Promise<ManifestSnapshot> {
   const out: ManifestEntry[] = [];
   const removed = new Set<string>();
@@ -410,6 +417,7 @@ export async function fetchManifestSnapshot(
     const res = await fetchManifestPage({ config, since, cursor, limit: 500, conditional });
 
     out.push(...res.items);
+    if (out.length > 0) onProgress?.(out.length);
     if (Array.isArray(res.removed_keys)) {
       for (const k of res.removed_keys) if (typeof k === 'string' && k) removed.add(k);
     }
@@ -458,7 +466,7 @@ export async function fetchAssetBytes(
 
   return retryTransient(`download ${key}`, async () => {
     const { headers, requestId } = buildHeaders(conditional);
-    const res = await safeFetch(url.href, { headers });
+    const res = await safeFetch(url.href, { headers }, { timeoutMs: ASSET_TIMEOUT_MS });
     const serverRequestId = res.headers.get('x-request-id') ?? requestId;
     if (res.status === 304) {
       // Drain so undici can return the socket to the keep-alive pool.
@@ -546,11 +554,13 @@ export async function pushSprites(
   const url = resolveIngestEndpoint();
   return retryTransient('push', async () => {
     const { headers, requestId } = buildHeaders({ 'Content-Type': 'application/json' });
-    const res = await safeFetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ sprites }),
-    });
+    const res = await safeFetch(
+      url,
+      { method: 'POST', headers, body: JSON.stringify({ sprites }) },
+      // A push batch carries PNG bytes; give it the asset deadline, not the
+      // shorter JSON one.
+      { timeoutMs: ASSET_TIMEOUT_MS },
+    );
     const serverRequestId = res.headers.get('x-request-id') ?? requestId;
     if (res.ok) {
       const data = (await res.json()) as { results?: unknown } | null;
