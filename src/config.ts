@@ -80,6 +80,12 @@ export interface SyncedSprite {
   releasedVersion?: number;
   /** Current cloud baseline observed during an unresolved dual edit. */
   pendingCloudSha256?: string;
+  /**
+   * `pixel_art_assets.updated_at` of the row this baseline came from. Lets a
+   * sync prove a hash-less (legacy / uncached) row is unchanged without
+   * spending a conditional download per file.
+   */
+  cloudUpdatedAt?: string;
 }
 
 export interface SyncState {

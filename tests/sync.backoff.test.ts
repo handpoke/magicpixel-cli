@@ -13,7 +13,7 @@ import {
 // undercounted once the watcher had already stepped down to 5s/10s ticks.
 describe('nextBackoffForIdle', () => {
   it('uses the hot-window thresholds by default', () => {
-    expect(IDLE_BACKOFF_THRESHOLDS).toEqual({ softSec: 60, hardSec: 300 });
+    expect(IDLE_BACKOFF_THRESHOLDS).toEqual({ softSec: 60, hardSec: 300, coldSec: 900 });
   });
 
   it('returns the base interval before the soft threshold', () => {
@@ -33,6 +33,15 @@ describe('nextBackoffForIdle', () => {
     expect(nextBackoffForIdle(300, 20)).toBe(20); // intervalSec floor wins
   });
 
+  // A watcher left running overnight must stop spending the daily request
+  // allowance on polls nobody is waiting for.
+  it('crosses to 30s once the project has been quiet for 15 minutes', () => {
+    expect(nextBackoffForIdle(899, 2)).toBe(10);
+    expect(nextBackoffForIdle(900, 2)).toBe(30);
+    expect(nextBackoffForIdle(86_400, 5)).toBe(30);
+    expect(nextBackoffForIdle(900, 60)).toBe(60); // intervalSec floor wins
+  });
+
   it('never returns below the configured poll interval', () => {
     expect(nextBackoffForIdle(0, 30)).toBe(30);
     expect(nextBackoffForIdle(10_000, 30)).toBe(30);
@@ -41,6 +50,7 @@ describe('nextBackoffForIdle', () => {
   it('honors custom thresholds', () => {
     expect(nextBackoffForIdle(10, 2, { softSec: 10, hardSec: 20 })).toBe(5);
     expect(nextBackoffForIdle(20, 2, { softSec: 10, hardSec: 20 })).toBe(10);
+    expect(nextBackoffForIdle(40, 2, { softSec: 10, hardSec: 20, coldSec: 40 })).toBe(30);
   });
 });
 

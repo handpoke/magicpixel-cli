@@ -54,6 +54,37 @@ export function hasNewExplicitRelease(opts: Pick<
   return Number.isFinite(previous) && released > previous;
 }
 
+/**
+ * Cheap "nothing to do" test that runs before we hash the local PNG and before
+ * any per-file request. Two ways to prove a row is unchanged:
+ *
+ *  1. The manifest still reports the exact cloud composite sha we recorded.
+ *  2. The manifest has no sha at all (legacy / uncached documents) but the
+ *     row's `updated_at` has not moved since we last synced this key. A row
+ *     cannot change — including an editor Sync release — without its
+ *     `updated_at` advancing, so there is nothing to fetch.
+ *
+ * Case 2 is what stops a quiet project from spending one conditional download
+ * per file on every sync just to be told "304 Not Modified".
+ */
+export function canSkipWithoutHashing(opts: {
+  freshRelease: boolean;
+  fileExists: boolean;
+  cloudSha256?: string | null;
+  previousCloudSha256?: string;
+  cloudUpdatedAt?: string;
+  previousCloudUpdatedAt?: string;
+}): boolean {
+  if (opts.freshRelease || !opts.fileExists) return false;
+  if (opts.cloudSha256 && opts.previousCloudSha256 === opts.cloudSha256) return true;
+  if (opts.cloudSha256) return false;
+  return Boolean(
+    opts.cloudUpdatedAt &&
+      opts.previousCloudUpdatedAt &&
+      opts.cloudUpdatedAt === opts.previousCloudUpdatedAt,
+  );
+}
+
 export function decidePull(opts: PullDecisionInput): PullDecision {
   const cloud = opts.cloudSha256 ?? null;
   const local = opts.localSha256;

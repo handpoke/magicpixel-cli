@@ -1,5 +1,5 @@
 /**
- * Per-artboard Unity sync opt-in (strict), with a working-set override.
+ * Per-artboard game sync opt-in (strict).
  *
  * In the editor, each artboard has a "Sync to Unity" checkbox (and library
  * folders have a folder-level switch that cascades). A project may hold 100
@@ -12,11 +12,8 @@
  * `unknown` so the caller can warn instead of silently syncing the whole
  * library into someone's game project.
  *
- * Exception: sprites already in the game (connect working set / previously
- * synced keys) always pull. An editor save nulls `artboard_index` and the
- * next manifest often omits `unity` (or rebuilds it as false because the
- * layer JSON dropped `syncToUnity`). Those saves must still write back to
- * the original PNG.
+ * There is deliberately no working-set override: a local path or previous
+ * download must never turn an unmarked sibling into a pull candidate.
  */
 
 export interface UnityFilterable {
@@ -99,30 +96,20 @@ export function isWorkingSetEntry<T extends UnityFilterable>(
 }
 
 /**
+ * Whether an explicitly unmarked manifest entry should leave the local game.
+ * A file previously pulled by MagicPixel is safe to reconcile even if it now
+ * matches a connect glob; a game-authored working-set file without a sync
+ * baseline remains protected.
+ */
+export function shouldPruneDeselectedEntry(
+  entry: UnityFilterable,
+  opts: { sourceByKey: ReadonlyMap<string, string>; syncedKeys: ReadonlySet<string> },
+): boolean {
+  if (!entry.key) return false;
+  return !opts.sourceByKey.has(entry.key) || opts.syncedKeys.has(entry.key);
+}
+
+/**
  * Flagged artboards, plus any working-set sprite whose Unity flag is missing
  * or false after an editor save / index rebuild.
  */
-export function applyUnityPullPolicy<T extends UnityFilterable>(
-  manifest: T[],
-  opts: {
-    syncAll?: boolean;
-    alwaysPull?: (entry: T) => boolean;
-  } = {},
-): UnityFilterResult<T> {
-  const filtered = filterUnityManifest(manifest, { syncAll: opts.syncAll });
-  if (opts.syncAll || !opts.alwaysPull) return filtered;
-  const already = new Set(filtered.entries);
-  // Withheld entries stay out: a working-set sprite the user hasn't released
-  // must not be pulled over the copy in the game project.
-  const extra = partitionWithheldEntries(manifest).entries.filter(
-    (e) => !already.has(e) && opts.alwaysPull!(e),
-  );
-
-  if (extra.length === 0) return filtered;
-  const extraSet = new Set(extra);
-  return {
-    entries: filtered.entries.concat(extra),
-    unknown: filtered.unknown.filter((e) => !extraSet.has(e)),
-    noneFlagged: false,
-  };
-}

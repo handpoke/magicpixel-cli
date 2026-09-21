@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.26] — 2026-09-21
+
+- Clicking Sync now selects exactly that artboard and clears sibling selections,
+  so generated variants and pasted items in the same document stay out of the
+  game project.
+- Unity, Godot, and GameMaker now strictly require an explicit per-artboard
+  sync flag. Existing working-set paths can no longer bypass that choice.
+- Previously downloaded, now-unmarked siblings are removed on the next sync;
+  locally edited files remain protected as conflicts.
+
+## [0.5.25] — 2026-09-21
+
+- A sync no longer spends one request per file just to be told nothing changed:
+  files whose MagicPixel document has not been touched since the last sync are
+  skipped outright, instead of being re-checked one at a time.
+- "Nothing changed" replies no longer count against the daily request
+  allowance, so a watcher can idle all day without exhausting it.
+- A watcher that has been quiet for 15 minutes now polls every 30 seconds
+  (was 10), and snaps straight back to the fast interval on the first change.
+
 ## [0.5.24] — 2026-09-21
 
 - `push --force` keeps your local copy when a sprite changed in both places. It

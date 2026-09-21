@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
-  applyUnityPullPolicy,
   filterUnityManifest,
   isWorkingSetEntry,
   partitionWithheldEntries,
+  shouldPruneDeselectedEntry,
   workingSetPullKeys,
 } from '../src/util/unityFilter.js';
 import { selectFullSyncOrphans } from '../src/util/prunePolicy.js';
@@ -43,25 +43,12 @@ describe('filterUnityManifest', () => {
   });
 });
 
-describe('applyUnityPullPolicy', () => {
-  it('still pulls a connected sprite when the Unity flag is omitted after a save', () => {
-    const saved = { key: 'sprites/bomb/bomb', asset_id: 'row-1' };
-    const draft = { key: 'drafts/idea/idea' };
-    const r = applyUnityPullPolicy([saved, draft], {
-      alwaysPull: (e) => e.key === saved.key,
-    });
-    expect(r.entries.map((e) => e.key)).toEqual(['sprites/bomb/bomb']);
-    expect(r.unknown.map((e) => e.key)).toEqual(['drafts/idea/idea']);
-    expect(r.noneFlagged).toBe(false);
-  });
-
-  it('pulls a working-set sprite whose rebuilt index says unity: false', () => {
+describe('strict working-set isolation', () => {
+  it('never pulls a working-set sprite whose rebuilt index says unity: false', () => {
     const saved = { key: 'sprites/bomb/bomb', unity: false as const, asset_id: 'row-1' };
-    const r = applyUnityPullPolicy([saved], {
-      alwaysPull: (e) => e.key === saved.key,
-    });
-    expect(r.entries).toEqual([saved]);
-    expect(r.noneFlagged).toBe(false);
+    const r = filterUnityManifest([saved]);
+    expect(r.entries).toEqual([]);
+    expect(r.noneFlagged).toBe(true);
   });
 
   it('matches via previous_keys or asset_id when the fallback key differs', () => {
@@ -80,10 +67,7 @@ describe('applyUnityPullPolicy', () => {
       asset_id: 'row-1',
     };
     expect(isWorkingSetEntry(fallback, pull)).toBe(true);
-    const r = applyUnityPullPolicy([fallback], {
-      alwaysPull: (e) => isWorkingSetEntry(e, pull),
-    });
-    expect(r.entries).toEqual([fallback]);
+    expect(filterUnityManifest([fallback]).entries).toEqual([]);
   });
 
   it('does not pull unflagged sibling artboards of a connected document', () => {
@@ -93,11 +77,34 @@ describe('applyUnityPullPolicy', () => {
     );
     const sibling = { key: 'sprites/bomb/variant', unity: false as const, asset_id: 'row-1' };
     expect(isWorkingSetEntry(sibling, pull)).toBe(false);
-    const r = applyUnityPullPolicy([sibling], {
-      alwaysPull: (e) => isWorkingSetEntry(e, pull),
-    });
+    const r = filterUnityManifest([sibling]);
     expect(r.entries).toEqual([]);
     expect(r.noneFlagged).toBe(true);
+  });
+});
+
+describe('deselected local cleanup', () => {
+  const sourceByKey = new Map([['sprites/tree/variant-1', 'runtime/sprites/tree/variant-1.png']]);
+
+  it('removes a previously downloaded sibling even after it enters the working set', () => {
+    expect(shouldPruneDeselectedEntry(
+      { key: 'sprites/tree/variant-1', unity: false },
+      { sourceByKey, syncedKeys: new Set(['sprites/tree/variant-1']) },
+    )).toBe(true);
+  });
+
+  it('preserves a game-authored working-set file MagicPixel never downloaded', () => {
+    expect(shouldPruneDeselectedEntry(
+      { key: 'sprites/tree/variant-1', unity: false },
+      { sourceByKey, syncedKeys: new Set() },
+    )).toBe(false);
+  });
+
+  it('removes an unmarked MagicPixel download outside the working set', () => {
+    expect(shouldPruneDeselectedEntry(
+      { key: 'sprites/tree/variant-2', unity: false },
+      { sourceByKey, syncedKeys: new Set(['sprites/tree/variant-2']) },
+    )).toBe(true);
   });
 });
 
@@ -113,7 +120,7 @@ describe('withheld entries (manual sync release)', () => {
   it('never pulls a withheld entry, even flagged or with syncAll', () => {
     expect(filterUnityManifest([withheld]).entries).toEqual([]);
     expect(filterUnityManifest([withheld], { syncAll: true }).entries).toEqual([]);
-    expect(applyUnityPullPolicy([withheld], { syncAll: true }).entries).toEqual([]);
+    expect(filterUnityManifest([withheld], { syncAll: true }).entries).toEqual([]);
   });
 
   it('never pulls a withheld entry via the working-set override', () => {
@@ -121,7 +128,8 @@ describe('withheld entries (manual sync release)', () => {
       new Map([['library/hut/hut', 'Assets/hut.png']]),
       { 'library/hut/hut': { assetId: 'row-w' } },
     );
-    const r = applyUnityPullPolicy([withheld], { alwaysPull: (e) => isWorkingSetEntry(e, pull) });
+    expect(isWorkingSetEntry(withheld, pull)).toBe(true);
+    const r = filterUnityManifest([withheld]);
     expect(r.entries).toEqual([]);
   });
 

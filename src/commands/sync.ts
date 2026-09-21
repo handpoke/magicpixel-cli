@@ -16,7 +16,7 @@ import { detectProjectKind, isEngineKind } from '../util/framework.js';
 import { indexGamePngs, matchConnectGlobs, GAME_INDEX_CAP_HINT, connectCapMessage, countingSpritesText, type GameIndex, type ScanProgress } from '../util/gameScan.js';
 import { aliasCollisionKeys, collectSourceRelMap, isPathInside, syncDiskPathFromKey } from '../util/syncPath.js';
 import { DEFAULT_UNITY_PPU, writeMissingUnityMetas } from '../util/unityMeta.js';
-import { applyUnityPullPolicy, isWorkingSetEntry, partitionWithheldEntries, workingSetPullKeys } from '../util/unityFilter.js';
+import { filterUnityManifest, isWorkingSetEntry, partitionWithheldEntries, shouldPruneDeselectedEntry, workingSetPullKeys } from '../util/unityFilter.js';
 import { selectFullSyncOrphans } from '../util/prunePolicy.js';
 import { runTmpJanitor } from '../util/tmpJanitor.js';
 import { friendlyFsError } from '../util/errors.js';
@@ -25,7 +25,7 @@ import { formatBytes } from '../util/format.js';
 import { computePreviousKeyOrphans } from '../util/previousKeyOrphans.js';
 import { cmd } from '../util/invoke.js';
 import { formatSlowTickLine, formatWatchSpriteLine, SLOW_TICK_HEARTBEAT_MS } from '../util/watchCopy.js';
-import { decidePull, hasNewExplicitRelease } from '../util/pullDecision.js';
+import { canSkipWithoutHashing, decidePull, hasNewExplicitRelease } from '../util/pullDecision.js';
 import { hasUnpushedLocalEdit } from '../util/localEdit.js';
 import { shouldReconcile } from '../util/reconcile.js';
 import { runPush, type PushSummary } from './push.js';
@@ -421,10 +421,12 @@ function isNetworkError(err: Error): boolean {
 
 /**
  * Idle thresholds (seconds of consecutive idleness) at which the watcher steps
- * down from the configured interval to 5s, then to 10s. Single source of truth
- * for both the watch loop and its regression tests.
+ * down from the configured interval to 5s, then 10s, then 30s. Single source of
+ * truth for both the watch loop and its regression tests. The last step keeps a
+ * watcher left running overnight from spending the daily request allowance on
+ * polls nobody is waiting for.
  */
-export const IDLE_BACKOFF_THRESHOLDS = { softSec: 60, hardSec: 300 } as const;
+export const IDLE_BACKOFF_THRESHOLDS = { softSec: 60, hardSec: 300, coldSec: 900 } as const;
 
 /**
  * Pure helper: given how long we've been idle (wall-clock seconds since the
@@ -437,8 +439,9 @@ export const IDLE_BACKOFF_THRESHOLDS = { softSec: 60, hardSec: 300 } as const;
 export function nextBackoffForIdle(
   idleSeconds: number,
   intervalSec: number,
-  thresholds: { softSec: number; hardSec: number } = IDLE_BACKOFF_THRESHOLDS,
+  thresholds: { softSec: number; hardSec: number; coldSec?: number } = IDLE_BACKOFF_THRESHOLDS,
 ): number {
+  if (thresholds.coldSec != null && idleSeconds >= thresholds.coldSec) return Math.max(intervalSec, 30);
   if (idleSeconds >= thresholds.hardSec) return Math.max(intervalSec, 10);
   if (idleSeconds >= thresholds.softSec) return Math.max(intervalSec, 5);
   return intervalSec;
@@ -654,7 +657,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     throw e;
   }
 
-  // Unity projects sync only the artboards flagged "Sync to Unity" in the
+  // Game-engine projects sync only artboards explicitly selected in the
   // editor (parity with the in-app sync button). `unitySyncAll: true` in
   // magicpixel.json opts back into everything.
   onStatus?.('Looking through your game sprites…');
@@ -708,23 +711,21 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   }
   const workingSet = workingSetPullKeys(sourceByKey, state.synced);
 
-  // Files whose artboard is no longer flagged for Unity. Deleted even in
+  // Files whose artboard is no longer selected. Deleted even in
   // incremental mode: un-checking the box in the editor must actually remove
   // the sprite from the game project, not leave a stale copy behind.
   // Working-set (sourceRel) files are never deleted — they're the user's art.
   const deselectedPaths: string[] = [];
-  // Sprites whose "Sync to Unity" flag the server omitted. Not downloaded
+  // Sprites whose game-sync flag the server omitted. Not downloaded
   // (strict opt-in) but explicitly shielded from pruning: a transient server
   // response must never delete art from someone's game project.
   const unknownFlagPaths = new Set<string>();
-  if (projectKind === 'Unity') {
-    const filtered = applyUnityPullPolicy(manifest, {
-      syncAll: config.unitySyncAll,
-      alwaysPull: (entry) => isWorkingSetEntry(entry, workingSet),
-    });
+  if (isEngineKind(projectKind)) {
+    const filtered = filterUnityManifest(manifest, { syncAll: config.unitySyncAll });
+    const syncedKeys = new Set(Object.keys(state.synced ?? {}));
     if (filtered.unknown.length > 0) {
       const n = filtered.unknown.length;
-      const msg = `${n} artboard${n === 1 ? '' : 's'} came back without a "Sync to Unity" flag — skipped (existing files kept).`;
+      const msg = `${n} artboard${n === 1 ? '' : 's'} came back without a game-sync flag — skipped (existing files kept).`;
       if (verbose) {
         console.log(kleur.yellow(`! ${msg}`));
         console.log(kleur.dim(`  Fix: re-run \`${cmd('sync')}\` in a moment, or upgrade with \`npm i -D @magicpixelart/cli@latest\`.`));
@@ -741,51 +742,26 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
         unknownFlagPaths.add(p);
         continue;
       }
-      if (sourceByKey.has(entry.key)) continue;
+      // A tracked download is ours to reconcile even when its path now falls
+      // under a connect glob. Genuine game-authored files have no synced
+      // baseline and remain protected.
+      if (!shouldPruneDeselectedEntry(entry, { sourceByKey, syncedKeys })) continue;
       if (existsSync(p)) deselectedPaths.push(p);
     }
 
-    if (filtered.noneFlagged) {
-      // Nothing flagged for pull — don't dump the library, and don't prune.
-      // Local sprites still go up so they appear in MagicPixel on connect.
-      if (verbose) {
-        console.log();
-        console.log(kleur.yellow('! No artboards are flagged "Sync to Unity" — nothing to pull.'));
-        console.log(kleur.dim(`  Working-set sprites (\`connect\` in magicpixel.json) still push into MagicPixel.`));
-        console.log(kleur.dim('  Flag folders/artboards in the library to pull them back into Unity.'));
-      }
-      const empty: SyncResult = {
-        added: [],
-        modified: [],
-        removed: [],
-        unchanged: 0,
-        failed: 0,
-        bytesIn: 0,
-        bytesSaved: 0,
-        renamed: [],
-        conflicts: [],
-      };
-      // Persist validators even when the cursor didn't move, so the next
-      // one-shot run starts from a conditional GET.
-      const lastSync =
-        observedUpdatedAt && !(state.lastSync && state.lastSync > observedUpdatedAt)
-          ? observedUpdatedAt
-          : state.lastSync;
-      await saveState({
-        ...state,
-        ...(lastSync ? { lastSync } : {}),
-        ...(since ? {} : { lastReconcile: startedAt }),
-        manifestEtags: manifestEtagsSnapshot(),
-      });
-
-      await maybePushLocalSprites(config.push, verbose, gameIndex, live && !!runOpts.watchMode, onStatus);
-      return empty;
+    if (filtered.noneFlagged && verbose) {
+      console.log();
+      console.log(kleur.dim(
+        since
+          ? '  No changed artboards are selected for download.'
+          : '  No artboards are selected for download.',
+      ));
     }
     const skipped = manifest.length - filtered.entries.length;
     manifest = filtered.entries;
     if (verbose && skipped > 0) {
       console.log(
-        kleur.dim(`  unity → ${skipped} artboard${skipped === 1 ? '' : 's'} not flagged for sync (skipped)`),
+        kleur.dim(`  game sync → ${skipped} artboard${skipped === 1 ? '' : 's'} not selected (skipped)`),
       );
     }
   }
@@ -867,7 +843,16 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
           previousReleasedVersion: synced[entry.key]?.releasedVersion,
           lastSync: state.lastSync,
         });
-        if (!freshRelease && entry.sha256 && previousCloudSha256 === entry.sha256 && existsSync(pathFor(entry))) {
+        if (
+          canSkipWithoutHashing({
+            freshRelease,
+            fileExists: existsSync(pathFor(entry)),
+            cloudSha256: entry.sha256,
+            previousCloudSha256,
+            cloudUpdatedAt: entry.updated_at,
+            previousCloudUpdatedAt: synced[entry.key]?.cloudUpdatedAt,
+          })
+        ) {
           shaByEntryId.set(entry.id, null);
           unchanged++;
           if (entry.size_bytes) bytesSaved += entry.size_bytes;
@@ -1002,8 +987,8 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   };
 
   for (const p of renameStalePaths) addOrphan(p);
-  // Un-checked "Sync to Unity" artboards: their PNG (and .meta) leaves the
-  // Unity project on the next sync, incremental or not. Working-set originals
+  // Deselected artboards: their PNG (and Unity .meta) leaves the game project
+  // on the next sync, incremental or not. Working-set originals
   // are never in this list.
   for (const p of deselectedPaths) addOrphan(p);
 
@@ -1042,7 +1027,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   }
 
   // A locally-edited file is never deleted, whatever put it in the prune set
-  // (deselected "Sync to Unity", trashed document, rename fallback,
+  // (deselected game sync, trashed document, rename fallback,
   // previous-key sweep): that edit is the only copy of the work until the user
   // pushes it or discards it. Manifest-resident conflicts were already detected
   // during the diff, so they skip the re-hash.
@@ -1401,6 +1386,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
         sha256: sha,
         diskSha256,
         legacy: true,
+        ...(entry.updated_at ? { cloudUpdatedAt: entry.updated_at } : {}),
         ...(sourceRel ? { sourceRel } : {}),
         ...(entry.released_at ? { releasedAt: entry.released_at } : {}),
         ...(entry.released_version != null ? { releasedVersion: entry.released_version } : {}),
@@ -1414,6 +1400,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       sha256: sha,
       diskSha256,
       ...(typeof entry.layer_count === 'number' ? { layers: entry.layer_count } : {}),
+      ...(entry.updated_at ? { cloudUpdatedAt: entry.updated_at } : {}),
       ...(sourceRel ? { sourceRel } : {}),
       ...(entry.released_at ? { releasedAt: entry.released_at } : {}),
       ...(entry.released_version != null ? { releasedVersion: entry.released_version } : {}),
