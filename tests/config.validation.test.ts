@@ -126,4 +126,25 @@ describe('loadState corrupt-quarantine recovery', () => {
     await saveState({ manifestEtags: etags }, dir);
     expect((await loadState(dir)).manifestEtags).toEqual(etags);
   });
+
+  it('round-trips release and pending-conflict baselines', async () => {
+    await saveState({
+      synced: {
+        'items/sword': {
+          assetId: 'asset-1',
+          layerIdx: 0,
+          sha256: 'cloud-old',
+          diskSha256: 'disk-old',
+          releasedAt: '2026-09-21T10:01:00Z',
+          releasedVersion: 8,
+          pendingCloudSha256: 'cloud-new',
+        },
+      },
+    }, dir);
+    expect((await loadState(dir)).synced?.['items/sword']).toMatchObject({
+      releasedAt: '2026-09-21T10:01:00Z',
+      releasedVersion: 8,
+      pendingCloudSha256: 'cloud-new',
+    });
+  });
 });

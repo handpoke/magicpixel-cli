@@ -64,6 +64,64 @@ describe('decidePull conflicts', () => {
       }),
     ).toBe('conflict');
   });
+
+  it('pulls a dual edit after a newer explicit artboard Sync press', () => {
+    expect(
+      decidePull({
+        ...base,
+        cloudSha256: 'cloud-new',
+        localSha256: 'disk-edited',
+        previousCloudSha256: 'cloud-old',
+        lastPushedDiskSha256: 'disk-old',
+        previousReleasedAt: '2026-09-21T10:00:00Z',
+        releasedAt: '2026-09-21T10:01:00Z',
+      }),
+    ).toBe('pull');
+  });
+
+  it('does not re-consume an old release marker', () => {
+    expect(
+      decidePull({
+        ...base,
+        cloudSha256: 'cloud-new',
+        localSha256: 'disk-edited',
+        previousCloudSha256: 'cloud-old',
+        lastPushedDiskSha256: 'disk-old',
+        previousReleasedAt: '2026-09-21T10:01:00Z',
+        releasedAt: '2026-09-21T10:01:00Z',
+      }),
+    ).toBe('conflict');
+  });
+
+  it('uses the release version when two presses share a timestamp', () => {
+    expect(
+      decidePull({
+        ...base,
+        cloudSha256: 'cloud-new',
+        localSha256: 'disk-edited',
+        previousCloudSha256: 'cloud-old',
+        lastPushedDiskSha256: 'disk-old',
+        previousReleasedAt: '2026-09-21T10:01:00Z',
+        releasedAt: '2026-09-21T10:01:00Z',
+        previousReleasedVersion: 7,
+        releasedVersion: 8,
+      }),
+    ).toBe('pull');
+  });
+
+  it('uses lastSync once when upgrading state without per-sprite release markers', () => {
+    expect(
+      decidePull({
+        ...base,
+        cloudSha256: 'cloud-new',
+        localSha256: 'disk-edited',
+        previousCloudSha256: 'cloud-old',
+        lastPushedDiskSha256: 'disk-old',
+        lastSync: '2026-09-21T10:00:00Z',
+        releasedAt: '2026-09-21T10:01:00Z',
+      }),
+    ).toBe('pull');
+  });
 });
 
 describe('shouldReconcile', () => {

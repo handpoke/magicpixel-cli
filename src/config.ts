@@ -74,6 +74,12 @@ export interface SyncedSprite {
    * cloud composite key onto that indexed PNG.
    */
   sourceRel?: string;
+  /** Latest explicit editor Sync release this local baseline has consumed. */
+  releasedAt?: string;
+  /** File revision captured by that release. */
+  releasedVersion?: number;
+  /** Current cloud baseline observed during an unresolved dual edit. */
+  pendingCloudSha256?: string;
 }
 
 export interface SyncState {

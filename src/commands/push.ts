@@ -40,6 +40,12 @@ export interface PushOpts {
   gameIndex?: GameIndex;
   /** Watch-mode status line (hash progress). Ignored when a spinner is shown. */
   onStatus?: (msg: string) => void;
+  /** Called from sync; suppress warnings the outer command already owns. */
+  nestedSync?: boolean;
+  /** Dual edits protected by the outer sync; direct push can resolve them. */
+  excludeKeys?: ReadonlySet<string>;
+  /** "My local copy wins": re-send refused sprites with the live cloud sha. */
+  force?: boolean;
 }
 
 export interface PushSummary {
@@ -144,6 +150,10 @@ export async function runPushWith(
         const segments = entry
           ? entry.adoptRel.replace(/\.png$/i, '').split('/')
           : key.split('/');
+        if (opts.excludeKeys?.has(key)) {
+          reportHash();
+          return;
+        }
         candidates.push({
           key,
           segments,
@@ -185,7 +195,7 @@ export async function runPushWith(
       ),
     );
   }
-  if (legacy.length > 0 && !quiet) {
+  if (legacy.length > 0 && !quiet && !opts.nestedSync) {
     console.log();
     console.log(
       kleur.yellow(
@@ -195,7 +205,7 @@ export async function runPushWith(
     console.log(kleur.dim(`  Fix: open the file in MagicPixel and save it once, then re-run \`${cmd('sync')}\`.`));
   }
 
-  if (flattenBlocked.length > 0 && !quiet) {
+  if (flattenBlocked.length > 0 && !quiet && !opts.nestedSync) {
     console.log();
     console.log(
       kleur.yellow(
@@ -277,7 +287,38 @@ export async function runPushWith(
     throw e;
   }
 
-  const counts = { created: 0, updated: 0, unchanged: 0, conflict: 0, error: 0 };
+  const spriteByKey = new Map(sprites.map((s) => [s.key, s]));
+  if (opts.force) {
+    // Two rounds at most: an adopt-shaped or hash-less refusal comes back
+    // without a live sha, and the retry as an update is what makes the server
+    // composite the artboard and report one.
+    for (let round = 0; round < 2; round++) {
+      const retry = forcedRetrySprites(results, spriteByKey, opts.flatten === true);
+      if (retry.length === 0) break;
+      const retryResults = await pushSpritesAdaptive(retry);
+      synced = await commitPushResults({
+        synced,
+        batchResults: retryResults,
+        candidates,
+        sourceByKey,
+        shaByKey,
+        fpByKey,
+        outDir: config.outDir,
+      });
+      await saveState({ ...state, synced });
+      replaceResultsByKey(results, retryResults);
+      if (retryResults.every((r) => r.status === 'conflict' && !r.sha256)) break;
+    }
+  }
+
+  // Remember the live cloud sha a refusal reported, so a later `push` (with or
+  // without --force) has a baseline the concurrency check accepts. The manifest
+  // hash can be absent for big documents, which used to dead-end this path.
+  if (rememberRefusedCloudShas(synced, results)) {
+    await saveState({ ...state, synced });
+  }
+
+  const counts = { created: 0, updated: 0, unchanged: skipped, conflict: 0, error: 0 };
   for (const r of results) {
     if (r.status in counts) counts[r.status as keyof typeof counts]++;
   }
@@ -292,13 +333,15 @@ export async function runPushWith(
   }
 
   if (!quiet) {
+    let printedIssues = 0;
     for (const r of results) {
       if (r.status === 'conflict') {
-        console.log(`  ${kleur.yellow('!')} ${r.key}: ${conflictHint(r.reason)}`);
+        if (printedIssues++ < 10) console.log(`  ${kleur.yellow('!')} ${r.key}: ${conflictHint(r.reason)}`);
       } else if (r.status === 'error') {
-        console.log(`  ${kleur.red('!')} ${r.key}: ${r.message ?? 'push failed'}`);
+        if (printedIssues++ < 10) console.log(`  ${kleur.red('!')} ${r.key}: ${r.message ?? 'push failed'}`);
       }
     }
+    if (printedIssues > 10) console.log(kleur.dim(`  …and ${printedIssues - 10} more`));
     if (counts.created > 0) {
       console.log(
         kleur.dim(
@@ -311,6 +354,67 @@ export async function runPushWith(
   if (failed) process.exitCode = 1;
   return { ...counts, imported: matched.entries.length };
 }
+
+/**
+ * Sprites to re-send under `--force`: every sprite the cloud refused because it
+ * also changed there, re-addressed as an update against the sha the refusal
+ * reported. Not a bypass — the server still compares, so a save that lands in
+ * between refuses again.
+ */
+export function forcedRetrySprites(
+  results: readonly PushResult[],
+  spriteByKey: ReadonlyMap<string, PushSprite>,
+  flatten: boolean,
+): PushSprite[] {
+  const out: PushSprite[] = [];
+  for (const r of results) {
+    if (r.status !== 'conflict' || r.reason !== 'cloud-changed' || !r.assetId) continue;
+    const original = spriteByKey.get(r.key);
+    if (!original) continue;
+    // Skip a round we already tried with this exact baseline.
+    if (r.sha256 && original.baseSha256 === r.sha256) continue;
+    out.push({
+      key: original.key,
+      pngBase64: original.pngBase64,
+      diskSha256: original.diskSha256,
+      assetId: r.assetId,
+      layerIdx: typeof r.layerIdx === 'number' ? r.layerIdx : (original.layerIdx ?? 0),
+      baseSha256: r.sha256 ?? null,
+      flatten,
+    });
+  }
+  return out;
+}
+
+/** Overwrite the earlier outcome for every retried key, in place. */
+export function replaceResultsByKey(results: PushResult[], updates: readonly PushResult[]): void {
+  for (const u of updates) {
+    const i = results.findIndex((r) => r.key === u.key);
+    if (i >= 0) results[i] = u;
+    else results.push(u);
+  }
+}
+
+/**
+ * Store the live cloud sha a `cloud-changed` refusal reported as this sprite's
+ * pending baseline. Returns true when anything changed.
+ */
+export function rememberRefusedCloudShas(
+  synced: Record<string, SyncedSprite>,
+  results: readonly PushResult[],
+): boolean {
+  let changed = false;
+  for (const r of results) {
+    if (r.status !== 'conflict' || r.reason !== 'cloud-changed' || !r.sha256) continue;
+    const prev = synced[r.key];
+    if (!prev || prev.pendingCloudSha256 === r.sha256) continue;
+    synced[r.key] = { ...prev, pendingCloudSha256: r.sha256 };
+    changed = true;
+  }
+  return changed;
+}
+
+
 
 async function commitPushResults(opts: {
   synced: Record<string, SyncedSprite>;
@@ -341,6 +445,7 @@ async function commitPushResults(opts: {
       if (stateKey !== r.key) delete nextSynced[r.key];
       const diskSha256 = shaByKey.get(r.key) ?? shaByKey.get(stateKey) ?? nextSynced[stateKey]?.diskSha256;
       const fp = fpByKey.get(r.key) ?? fpByKey.get(stateKey);
+      const previous = nextSynced[stateKey];
       nextSynced[stateKey] = {
         assetId: r.assetId,
         layerIdx: typeof r.layerIdx === 'number' ? r.layerIdx : (nextSynced[stateKey]?.layerIdx ?? 0),
@@ -350,6 +455,8 @@ async function commitPushResults(opts: {
         ...(fp?.diskMtimeMs != null ? { diskMtimeMs: fp.diskMtimeMs } : {}),
         ...(fp?.diskSize != null ? { diskSize: fp.diskSize } : {}),
         ...(sourceRel ? { sourceRel } : {}),
+        ...(previous?.releasedAt ? { releasedAt: previous.releasedAt } : {}),
+        ...(previous?.releasedVersion != null ? { releasedVersion: previous.releasedVersion } : {}),
       };
     }
   }
@@ -366,7 +473,7 @@ async function persistDiskFingerprints(state: SyncState, candidates: readonly Pu
 function conflictHint(reason?: string): string {
   switch (reason) {
     case 'cloud-changed':
-      return `changed in MagicPixel since the last sync — run \`${cmd('sync')}\` first, then re-push.`;
+      return `also changed in MagicPixel. Press Sync on that artboard to use MagicPixel's copy, or run \`${cmd('push --force')}\` to keep this local one.`;
     case 'would-flatten':
       return 'artboard has multiple layers or frames — re-run with --flatten to replace it.';
     case 'legacy-document':
@@ -374,7 +481,7 @@ function conflictHint(reason?: string): string {
     case 'not-found':
       return `artboard no longer exists in MagicPixel — run \`${cmd('sync')}\` to refresh.`;
     default:
-      return `conflict — run \`${cmd('sync')}\` and try again.`;
+      return `conflict — review both copies, then press the artboard's Sync button to use MagicPixel's copy.`;
   }
 }
 

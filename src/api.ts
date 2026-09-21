@@ -35,6 +35,10 @@ export interface ManifestEntry {
    * wrote for this document — never pull it, never count it as an orphan.
    */
   withheld?: boolean;
+  /** Latest explicit editor Sync press for this file. */
+  released_at?: string;
+  /** File revision captured by that Sync press. */
+  released_version?: number;
 
   /** Row id + artboard index — the address `push` writes a disk edit back to. */
   asset_id?: string;

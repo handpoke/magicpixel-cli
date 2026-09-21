@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.24] — 2026-09-21
+
+- `push --force` keeps your local copy when a sprite changed in both places. It
+  re-sends against the live cloud state rather than skipping the safety check,
+  so a save that lands in between is still reported instead of overwritten.
+- A both-sides-changed refusal now carries the live cloud fingerprint, so a
+  follow-up `push` works even for large documents whose hash wasn't cached —
+  the last case where the sync/push advice could still dead-end.
+- Conflict messages name both ways out: press Sync on the artboard, or
+  `push --force`.
+
+## [0.5.23] — 2026-09-21
+
+- Pressing Sync on an artboard now explicitly chooses MagicPixel's copy when
+  that PNG was also edited locally, resolving the previous sync/push loop.
+- Conflict lists are capped, nested push warnings no longer repeat during
+  sync, and completion summaries include locally unchanged sprites accurately.
+
 ## [0.5.22] — 2026-09-14
 
 - Raised the daily sprite download allowance from 1 GiB to 10 GiB for large

@@ -197,7 +197,10 @@ export function planPush(
         key: c.key,
         assetId: known.assetId,
         layerIdx: known.layerIdx,
-        baseSha256: known.sha256,
+        // `sync` records the live cloud hash when it protects a dual edit.
+        // A later explicit `push` can then safely keep the local copy without
+        // bypassing the server's optimistic-concurrency check.
+        baseSha256: known.pendingCloudSha256 ?? known.sha256,
       });
       continue;
     }

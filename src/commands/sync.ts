@@ -25,7 +25,7 @@ import { formatBytes } from '../util/format.js';
 import { computePreviousKeyOrphans } from '../util/previousKeyOrphans.js';
 import { cmd } from '../util/invoke.js';
 import { formatSlowTickLine, formatWatchSpriteLine, SLOW_TICK_HEARTBEAT_MS } from '../util/watchCopy.js';
-import { decidePull } from '../util/pullDecision.js';
+import { decidePull, hasNewExplicitRelease } from '../util/pullDecision.js';
 import { hasUnpushedLocalEdit } from '../util/localEdit.js';
 import { shouldReconcile } from '../util/reconcile.js';
 import { runPush, type PushSummary } from './push.js';
@@ -828,6 +828,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   const shaByEntryId = new Map<string, string | null>();
   const toDownload: ManifestEntry[] = [];
   const conflicts: string[] = [];
+  const failedDownloadKeys = new Set<string>();
   let bytesSaved = 0;
   let unchanged = 0;
   const synced = state.synced ?? {};
@@ -858,7 +859,15 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
         const inWorkingSet = isWorkingSetEntry(entry, workingSet);
         // Unchanged cloud composite: skip hashing the original PNG (it almost
         // never matches) unless the file is gone and we need to restore it.
-        if (entry.sha256 && previousCloudSha256 === entry.sha256 && existsSync(pathFor(entry))) {
+        const previousReleasedAt = synced[entry.key]?.releasedAt;
+        const freshRelease = hasNewExplicitRelease({
+          releasedAt: entry.released_at,
+          previousReleasedAt,
+          releasedVersion: entry.released_version,
+          previousReleasedVersion: synced[entry.key]?.releasedVersion,
+          lastSync: state.lastSync,
+        });
+        if (!freshRelease && entry.sha256 && previousCloudSha256 === entry.sha256 && existsSync(pathFor(entry))) {
           shaByEntryId.set(entry.id, null);
           unchanged++;
           if (entry.size_bytes) bytesSaved += entry.size_bytes;
@@ -872,6 +881,11 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
           previousCloudSha256,
           lastPushedDiskSha256: synced[entry.key]?.diskSha256,
           inWorkingSet,
+          releasedAt: entry.released_at,
+          previousReleasedAt,
+          releasedVersion: entry.released_version,
+          previousReleasedVersion: synced[entry.key]?.releasedVersion,
+          lastSync: state.lastSync,
         });
         if (decision === 'conflict') {
           conflicts.push(entry.key);
@@ -1218,6 +1232,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
           }
         } catch (e) {
           result.failed++;
+          failedDownloadKeys.add(entry.key);
           progress?.stop();
           // Multi-line messages come from friendlyFsError — print all lines
           // so the user sees the fix hint. Single-line errors stay terse.
@@ -1356,8 +1371,20 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     // Conflicted keys keep their old baselines: recording the new cloud sha
     // (with the locally-edited disk sha) would make both halves believe they
     // are in sync and freeze the divergence forever.
-    if (conflictSet.has(entry.key)) continue;
-    const sha = entry.sha256 ?? (await fileSha256(pathFor(entry)));
+    if (conflictSet.has(entry.key)) {
+      const previous = nextSynced[entry.key];
+      if (previous && entry.sha256) {
+        nextSynced[entry.key] = { ...previous, pendingCloudSha256: entry.sha256 };
+      }
+      continue;
+    }
+    if (failedDownloadKeys.has(entry.key)) continue;
+    // After a write, the actual downloaded bytes are the disk/cloud baseline.
+    // The manifest hash may be null or represent a cached composite while the
+    // download endpoint serves storage bytes for a single-artboard document.
+    const sha = writtenKeys.has(entry.key)
+      ? await fileSha256(pathFor(entry))
+      : (entry.sha256 ?? (await fileSha256(pathFor(entry))));
     if (!sha) continue;
     const prev = nextSynced[entry.key];
     const diskSha256 = writtenKeys.has(entry.key)
@@ -1368,7 +1395,16 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     // them anyway, flagged, so `push` skips them with a hint instead of
     // adopting the same art as a second document.
     if (typeof entry.layer_idx !== 'number' || entry.layer_idx < 0) {
-      nextSynced[entry.key] = { assetId: entry.asset_id, layerIdx: 0, sha256: sha, diskSha256, legacy: true, ...(sourceRel ? { sourceRel } : {}) };
+      nextSynced[entry.key] = {
+        assetId: entry.asset_id,
+        layerIdx: 0,
+        sha256: sha,
+        diskSha256,
+        legacy: true,
+        ...(sourceRel ? { sourceRel } : {}),
+        ...(entry.released_at ? { releasedAt: entry.released_at } : {}),
+        ...(entry.released_version != null ? { releasedVersion: entry.released_version } : {}),
+      };
       continue;
     }
     nextSynced[entry.key] = {
@@ -1379,6 +1415,8 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       diskSha256,
       ...(typeof entry.layer_count === 'number' ? { layers: entry.layer_count } : {}),
       ...(sourceRel ? { sourceRel } : {}),
+      ...(entry.released_at ? { releasedAt: entry.released_at } : {}),
+      ...(entry.released_version != null ? { releasedVersion: entry.released_version } : {}),
     };
   }
   const nextState: SyncState = {
@@ -1455,6 +1493,16 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     console.log(kleur.yellow(`\n${result.failed} download${result.failed === 1 ? '' : 's'} failed — lastSync not advanced. Re-run to retry.`));
   }
 
+  onStatus?.('Checking your game files…');
+  const pushed = await maybePushLocalSprites(
+    config.push,
+    verbose,
+    gameIndex,
+    live && !!runOpts.watchMode,
+    onStatus,
+    conflictSet,
+  );
+
   if (verbose) {
     console.log();
     const summary =
@@ -1464,22 +1512,15 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       (shouldPrune ? `, pruned ${result.removed.length}` : '') +
       (renamed.length ? `, renamed ${renamed.length}` : '') +
       (result.failed ? `, failed ${result.failed}` : '');
-    console.log(result.failed ? kleur.yellow(`done with errors. ${summary}`) : kleur.green(`✓ done. ${summary}`));
-    // Per-file change list. Suppress renames here — printRenames below owns
-    // the rename block (it adds the import-update hints). Letting both fire
-    // would print each rename twice.
+    const pushFailed = (pushed?.conflict ?? 0) + (pushed?.error ?? 0);
+    console.log(
+      result.failed || pushFailed
+        ? kleur.yellow(`Sync finished with issues. ${summary}`)
+        : kleur.green(`✓ Sync complete. ${summary}`),
+    );
     printChanges(result, '  ', { includeRenames: renamed.length === 0 });
     if (renamed.length > 0) printRenames(renamed, { withHints: true });
   }
-
-  onStatus?.('Checking your game files…');
-  const pushed = await maybePushLocalSprites(
-    config.push,
-    verbose,
-    gameIndex,
-    live && !!runOpts.watchMode,
-    onStatus,
-  );
 
   if (result.failed) process.exitCode = 1;
   return { ...result, pushed };
@@ -1491,10 +1532,11 @@ async function maybePushLocalSprites(
   gameIndex?: GameIndex,
   announceErrors = verbose,
   onStatus?: (msg: string) => void,
+  excludeKeys?: ReadonlySet<string>,
 ): Promise<PushSummary | null> {
   if (pushEnabled === false) return null;
   try {
-    return await runPush({ quiet: !verbose, gameIndex, onStatus });
+    return await runPush({ quiet: !verbose, nestedSync: true, gameIndex, onStatus, excludeKeys });
   } catch (e) {
     if (announceErrors) {
       console.log();
@@ -1568,13 +1610,14 @@ function printConflicts(keys: string[], removedRemotely: ReadonlySet<string> = n
   console.log(
     kleur.yellow(`${keys.length} sprite${keys.length === 1 ? '' : 's'} changed in both places — not overwritten:`),
   );
-  for (const key of keys) {
+  for (const key of keys.slice(0, 10)) {
     const note = removedRemotely.has(key) ? kleur.dim(' (no longer synced from MagicPixel)') : '';
     console.log(`  ${kleur.yellow('~')} ${key}${note}`);
   }
+  if (keys.length > 10) console.log(kleur.dim(`  …and ${keys.length - 10} more`));
   console.log(
     kleur.dim(
-      `  Keep the local edit: run \`${cmd('push')}\` (it will report the cloud change), or delete the PNG to accept MagicPixel's copy.`,
+      `  Use MagicPixel's copy: press Sync on that artboard. Keep the local edit: run \`${cmd('push --force')}\`.`,
     ),
   );
   if (removedRemotely.size > 0) {

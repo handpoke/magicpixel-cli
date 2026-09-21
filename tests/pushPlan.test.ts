@@ -13,6 +13,29 @@ const synced = {
 };
 
 describe('planPush', () => {
+  it('uses the latest observed cloud baseline to resolve an explicit local push', () => {
+    const actions = planPush(
+      [{ key: 'items/sword', segments: ['items', 'sword'], diskSha256: 'disk-new' }],
+      {
+        'items/sword': {
+          assetId: 'asset-1',
+          layerIdx: 0,
+          sha256: 'cloud-old',
+          pendingCloudSha256: 'cloud-new',
+          diskSha256: 'disk-old',
+        },
+      },
+    );
+    expect(actions).toEqual([
+      {
+        kind: 'update',
+        key: 'items/sword',
+        assetId: 'asset-1',
+        layerIdx: 0,
+        baseSha256: 'cloud-new',
+      },
+    ]);
+  });
   it('skips unchanged sprites', () => {
     const [a] = planPush([candidate('characters/hero/walk', 'same')], synced);
     expect(a.kind).toBe('skip');

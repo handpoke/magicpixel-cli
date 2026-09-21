@@ -27,12 +27,41 @@ export interface PullDecisionInput {
   lastPushedDiskSha256?: string;
   /** True when this key maps to an original game file (connect working set). */
   inWorkingSet: boolean;
+  /** Explicit editor Sync marker carried by the current manifest entry. */
+  releasedAt?: string;
+  /** Last release marker this local state has already consumed. */
+  previousReleasedAt?: string;
+  releasedVersion?: number;
+  previousReleasedVersion?: number;
+  /** Cursor from a pre-marker CLI state; used only for safe upgrade detection. */
+  lastSync?: string;
+}
+
+/** A newer editor Sync press explicitly chooses MagicPixel for this sprite. */
+export function hasNewExplicitRelease(opts: Pick<
+  PullDecisionInput,
+  'releasedAt' | 'previousReleasedAt' | 'releasedVersion' | 'previousReleasedVersion' | 'lastSync'
+>): boolean {
+  if (opts.releasedVersion != null && opts.previousReleasedVersion != null) {
+    return opts.releasedVersion > opts.previousReleasedVersion;
+  }
+  if (!opts.releasedAt) return false;
+  const released = Date.parse(opts.releasedAt);
+  if (!Number.isFinite(released)) return false;
+  const baseline = opts.previousReleasedAt ?? opts.lastSync;
+  if (!baseline) return false;
+  const previous = Date.parse(baseline);
+  return Number.isFinite(previous) && released > previous;
 }
 
 export function decidePull(opts: PullDecisionInput): PullDecision {
   const cloud = opts.cloudSha256 ?? null;
   const local = opts.localSha256;
   const prev = opts.previousCloudSha256;
+
+  // A fresh explicit release is the user's scoped instruction for the cloud
+  // copy to replace this PNG, even if the PNG also changed locally.
+  if (hasNewExplicitRelease(opts)) return 'pull';
 
   // Missing on disk → restore from cloud (MagicPixel-only art and deletions).
   if (!local) return 'pull';
