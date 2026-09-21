@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.27] — 2026-09-21
+
+- Fixed Sync presses that changed only an artboard selection being skipped as
+  unchanged, which left the server without the selected-artboard metadata.
+- Removed connected-folder and `unitySyncAll` selection fallbacks. Game sync
+  now downloads only artboards explicitly selected with Sync to Game.
+- Previously downloaded, now-unselected variants remain eligible for safe,
+  tracked-only pruning during reconciliation.
+
 ## [0.5.26] — 2026-09-21
 
 - Clicking Sync now selects exactly that artboard and clears sibling selections,

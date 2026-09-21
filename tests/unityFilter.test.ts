@@ -35,12 +35,6 @@ describe('filterUnityManifest', () => {
     expect(filterUnityManifest([]).noneFlagged).toBe(false);
   });
 
-  it('bypasses filtering with unitySyncAll', () => {
-    const r = filterUnityManifest([flagged, unflagged, unknown], { syncAll: true });
-    expect(r.entries).toHaveLength(3);
-    expect(r.noneFlagged).toBe(false);
-    expect(r.unknown).toEqual([]);
-  });
 });
 
 describe('strict working-set isolation', () => {
@@ -106,6 +100,25 @@ describe('deselected local cleanup', () => {
       { sourceByKey, syncedKeys: new Set(['sprites/tree/variant-2']) },
     )).toBe(true);
   });
+
+  it('a full reconcile pulls one selected original and prunes 47 tracked variants', () => {
+    const original = { key: 'decorations/tree/tree', unity: true as const };
+    const variants = Array.from({ length: 47 }, (_, index) => ({
+      key: `decorations/tree/variant-${index + 1}`,
+      unity: false as const,
+    }));
+    const filtered = filterUnityManifest([original, ...variants]);
+    expect(filtered.entries.map((entry) => entry.key)).toEqual([original.key]);
+
+    const sourceByKey = new Map(
+      variants.map((entry) => [entry.key, `runtime/sprites/${entry.key}.png`]),
+    );
+    const syncedKeys = new Set(variants.map((entry) => entry.key));
+    expect(variants.filter((entry) => shouldPruneDeselectedEntry(
+      entry,
+      { sourceByKey, syncedKeys },
+    ))).toHaveLength(47);
+  });
 });
 
 describe('withheld entries (manual sync release)', () => {
@@ -117,10 +130,8 @@ describe('withheld entries (manual sync release)', () => {
     expect(p.withheld.map((e) => e.key)).toEqual(['library/hut/hut']);
   });
 
-  it('never pulls a withheld entry, even flagged or with syncAll', () => {
+  it('never pulls a withheld entry, even when flagged', () => {
     expect(filterUnityManifest([withheld]).entries).toEqual([]);
-    expect(filterUnityManifest([withheld], { syncAll: true }).entries).toEqual([]);
-    expect(filterUnityManifest([withheld], { syncAll: true }).entries).toEqual([]);
   });
 
   it('never pulls a withheld entry via the working-set override', () => {

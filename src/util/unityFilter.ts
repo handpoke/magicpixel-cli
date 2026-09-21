@@ -1,10 +1,9 @@
 /**
  * Per-artboard game sync opt-in (strict).
  *
- * In the editor, each artboard has a "Sync to Unity" checkbox (and library
- * folders have a folder-level switch that cascades). A project may hold 100
- * drafts but only 3 artboards that belong in the Unity project, so the CLI
- * mirrors the in-app sync button and pulls ONLY the flagged ones.
+ * A project may hold 100 drafts but only 3 artboards that belong in the game,
+ * so the CLI mirrors the in-app Sync to Game action and pulls ONLY the
+ * explicitly flagged ones.
  *
  * Strict opt-in: `unity === true` syncs, anything else does not. A missing
  * flag means the server didn't say (older edge deploy, or a budget-starved
@@ -36,7 +35,7 @@ export interface UnityFilterResult<T> {
 
 /**
  * Split the manifest into syncable entries and withheld ones. Withheld entries
- * are never pull candidates (not even under `unitySyncAll`) and carry no bytes;
+ * are never pull candidates and carry no bytes;
  * callers use them only to protect what's already on disk from pruning.
  */
 export function partitionWithheldEntries<T extends UnityFilterable>(
@@ -50,10 +49,8 @@ export function partitionWithheldEntries<T extends UnityFilterable>(
 
 export function filterUnityManifest<T extends UnityFilterable>(
   manifest: T[],
-  opts: { syncAll?: boolean } = {},
 ): UnityFilterResult<T> {
   const syncable = partitionWithheldEntries(manifest).entries;
-  if (opts.syncAll) return { entries: syncable, noneFlagged: false, unknown: [] };
   const entries = syncable.filter((e) => e.unity === true);
   const unknown = syncable.filter((e) => typeof e.unity !== 'boolean');
   return {

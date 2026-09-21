@@ -23,9 +23,6 @@ export interface MagicPixelConfig {
   emitIndex?: boolean;
   /** Unity only: pixels-per-unit baked into generated `.meta` files (default 32). */
   unityPpu?: number;
-  /** Unity only: sync every artboard instead of only the ones flagged
-   *  "Sync to Unity" in the editor (default false). */
-  unitySyncAll?: boolean;
   /** Disk → MagicPixel on every `sync`. Set false for pull-only. Default true. */
   push?: boolean;
   /**
@@ -206,7 +203,6 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<MagicPixe
     endpoint,
     emitIndex,
     unityPpu,
-    unitySyncAll: parsed.unitySyncAll === true ? true : undefined,
     push: parsed.push === false ? false : undefined,
     connect,
   };

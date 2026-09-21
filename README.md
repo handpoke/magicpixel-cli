@@ -150,7 +150,6 @@ Sync is built to be cheap: a no-op run is one small manifest request, zero PNG b
 | `connect`  | `string[]` | `["**"]` on engines | Game PNG globs to keep in Connected. Empty on JS projects. |
 | `emitIndex`| `boolean`  | `true`                  | Emit `<outDir>/index.ts` with typed asset map.   |
 | `unityPpu` | `number?`  | `32`                    | Unity only: pixels-per-unit in generated `.meta`. |
-| `unitySyncAll` | `boolean?` | `false`             | Game engines only: sync every artboard instead of only the one explicitly selected in the editor. |
 | `push`     | `boolean?` | `true`                  | Upload local PNG changes (outDir + `connect` working set) to MagicPixel on every `sync`. Set `false` for pull-only. |
 | `endpoint` | `string?`  | production URL          | Override the API base (testing only). Must be **HTTPS**. |
 

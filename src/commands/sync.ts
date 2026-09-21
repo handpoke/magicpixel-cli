@@ -658,8 +658,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   }
 
   // Game-engine projects sync only artboards explicitly selected in the
-  // editor (parity with the in-app sync button). `unitySyncAll: true` in
-  // magicpixel.json opts back into everything.
+  // editor (parity with the in-app sync button).
   onStatus?.('Looking through your game sprites…');
   const projectKind = await detectProjectKind();
   const gameIndex = runOpts.gameIndex
@@ -721,7 +720,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   // response must never delete art from someone's game project.
   const unknownFlagPaths = new Set<string>();
   if (isEngineKind(projectKind)) {
-    const filtered = filterUnityManifest(manifest, { syncAll: config.unitySyncAll });
+    const filtered = filterUnityManifest(manifest);
     const syncedKeys = new Set(Object.keys(state.synced ?? {}));
     if (filtered.unknown.length > 0) {
       const n = filtered.unknown.length;
