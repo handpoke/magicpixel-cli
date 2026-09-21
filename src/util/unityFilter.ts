@@ -21,7 +21,10 @@
 
 export interface UnityFilterable {
   unity?: boolean;
+  /** Server withheld this document (unreleased edits) — hold, never pull. */
+  withheld?: boolean;
   key?: string;
+  folder?: string | null;
   previous_keys?: string[];
   asset_id?: string;
 }
@@ -34,19 +37,35 @@ export interface UnityFilterResult<T> {
   unknown: T[];
 }
 
+/**
+ * Split the manifest into syncable entries and withheld ones. Withheld entries
+ * are never pull candidates (not even under `unitySyncAll`) and carry no bytes;
+ * callers use them only to protect what's already on disk from pruning.
+ */
+export function partitionWithheldEntries<T extends UnityFilterable>(
+  manifest: T[],
+): { entries: T[]; withheld: T[] } {
+  const withheld: T[] = [];
+  const entries: T[] = [];
+  for (const e of manifest) (e.withheld === true ? withheld : entries).push(e);
+  return { entries, withheld };
+}
+
 export function filterUnityManifest<T extends UnityFilterable>(
   manifest: T[],
   opts: { syncAll?: boolean } = {},
 ): UnityFilterResult<T> {
-  if (opts.syncAll) return { entries: manifest, noneFlagged: false, unknown: [] };
-  const entries = manifest.filter((e) => e.unity === true);
-  const unknown = manifest.filter((e) => typeof e.unity !== 'boolean');
+  const syncable = partitionWithheldEntries(manifest).entries;
+  if (opts.syncAll) return { entries: syncable, noneFlagged: false, unknown: [] };
+  const entries = syncable.filter((e) => e.unity === true);
+  const unknown = syncable.filter((e) => typeof e.unity !== 'boolean');
   return {
     entries,
-    noneFlagged: manifest.length > 0 && entries.length === 0,
+    noneFlagged: syncable.length > 0 && entries.length === 0,
     unknown,
   };
 }
+
 
 /** Keys we already write to on disk — connect globs plus those sprites' cloud aliases. */
 export function workingSetPullKeys(
@@ -93,7 +112,12 @@ export function applyUnityPullPolicy<T extends UnityFilterable>(
   const filtered = filterUnityManifest(manifest, { syncAll: opts.syncAll });
   if (opts.syncAll || !opts.alwaysPull) return filtered;
   const already = new Set(filtered.entries);
-  const extra = manifest.filter((e) => !already.has(e) && opts.alwaysPull!(e));
+  // Withheld entries stay out: a working-set sprite the user hasn't released
+  // must not be pulled over the copy in the game project.
+  const extra = partitionWithheldEntries(manifest).entries.filter(
+    (e) => !already.has(e) && opts.alwaysPull!(e),
+  );
+
   if (extra.length === 0) return filtered;
   const extraSet = new Set(extra);
   return {

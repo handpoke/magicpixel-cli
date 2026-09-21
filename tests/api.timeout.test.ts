@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { fetchManifestSnapshot, retryTransient } from '../src/api.js';
+import { ApiError, DAILY_QUOTA_ERROR_CODE, fetchManifestSnapshot, retryTransient } from '../src/api.js';
 import { safeFetch } from '../src/util/security.js';
 
 const realFetch = globalThis.fetch;
@@ -60,6 +60,32 @@ describe('safeFetch request deadline', () => {
 });
 
 describe('fetchManifestSnapshot progress', () => {
+  it('surfaces daily quota exhaustion immediately with its reset time', async () => {
+    vi.stubEnv('MAGICPIXEL_API_KEY', 'mp_test_' + 'a'.repeat(64));
+    globalThis.fetch = (() => Promise.resolve(new Response(
+      JSON.stringify({
+        error: 'Daily download quota exceeded. Resets at 00:00 UTC.',
+        code: DAILY_QUOTA_ERROR_CODE,
+      }),
+      {
+        status: 429,
+        headers: {
+          'Retry-After': '43200',
+          'X-MagicPixel-Error-Code': DAILY_QUOTA_ERROR_CODE,
+        },
+      },
+    ))) as typeof fetch;
+
+    const promise = fetchManifestSnapshot({
+      outDir: 'tmp', include: ['**/*'], exclude: [], connect: [], emitIndex: false,
+    });
+    await expect(promise).rejects.toMatchObject({
+      status: 429,
+      code: DAILY_QUOTA_ERROR_CODE,
+    } satisfies Partial<ApiError>);
+    await expect(promise).rejects.toThrow(/allowance reached.*00:00 UTC/i);
+  });
+
   it('reports a running entry count per page', async () => {
     vi.stubEnv('MAGICPIXEL_API_KEY', 'mp_test_' + 'a'.repeat(64));
     const pages = [

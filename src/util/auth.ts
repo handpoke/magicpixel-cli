@@ -1,5 +1,5 @@
 import { resolveEndpoint, type MagicPixelConfig } from '../config.js';
-import { ApiError, retryTransient } from '../api.js';
+import { ApiError, errorCodeFromResponse, friendlyApiError, retryAfterMsFromResponse, retryTransient } from '../api.js';
 import { safeFetch, readBodyWithLimit } from './security.js';
 import { authHeaders } from './authHeaders.js';
 
@@ -37,12 +37,15 @@ export async function assertKeyValid(key: string, config: MagicPixelConfig): Pro
       // we ultimately surface.
       const bodyBytes = await readBodyWithLimit(res, 16 * 1024).catch(() => new Uint8Array());
       const body = new TextDecoder().decode(bodyBytes);
+      const errorCode = errorCodeFromResponse(res);
       // 5xx + 429 retry through retryTransient; other 4xx bubble immediately.
       throw new ApiError(
         res.status,
-        `Server returned ${res.status}: ${body.slice(0, 120)}\n` +
+        `${friendlyApiError(res.status, body, 'validate key', errorCode)}\n` +
           `  (request id: ${serverRequestId})`,
         serverRequestId,
+        retryAfterMsFromResponse(res),
+        errorCode,
       );
     }
     await res.body?.cancel();

@@ -3,8 +3,10 @@ import {
   applyUnityPullPolicy,
   filterUnityManifest,
   isWorkingSetEntry,
+  partitionWithheldEntries,
   workingSetPullKeys,
 } from '../src/util/unityFilter.js';
+import { selectFullSyncOrphans } from '../src/util/prunePolicy.js';
 
 const flagged = { key: 'a', unity: true };
 const unflagged = { key: 'b', unity: false };
@@ -96,5 +98,56 @@ describe('applyUnityPullPolicy', () => {
     });
     expect(r.entries).toEqual([]);
     expect(r.noneFlagged).toBe(true);
+  });
+});
+
+describe('withheld entries (manual sync release)', () => {
+  const withheld = { key: 'library/hut/hut', folder: 'library/hut', unity: true, withheld: true, asset_id: 'row-w' };
+
+  it('partitions withheld entries out of the syncable set', () => {
+    const p = partitionWithheldEntries([flagged, withheld]);
+    expect(p.entries.map((e) => e.key)).toEqual(['a']);
+    expect(p.withheld.map((e) => e.key)).toEqual(['library/hut/hut']);
+  });
+
+  it('never pulls a withheld entry, even flagged or with syncAll', () => {
+    expect(filterUnityManifest([withheld]).entries).toEqual([]);
+    expect(filterUnityManifest([withheld], { syncAll: true }).entries).toEqual([]);
+    expect(applyUnityPullPolicy([withheld], { syncAll: true }).entries).toEqual([]);
+  });
+
+  it('never pulls a withheld entry via the working-set override', () => {
+    const pull = workingSetPullKeys(
+      new Map([['library/hut/hut', 'Assets/hut.png']]),
+      { 'library/hut/hut': { assetId: 'row-w' } },
+    );
+    const r = applyUnityPullPolicy([withheld], { alwaysPull: (e) => isWorkingSetEntry(e, pull) });
+    expect(r.entries).toEqual([]);
+  });
+
+  it('does not report noneFlagged when the only entry is withheld', () => {
+    expect(filterUnityManifest([withheld]).noneFlagged).toBe(false);
+  });
+
+  it('keeps a withheld document on disk when its paths are protected', () => {
+    const disk = '/game/Assets/Art/library/hut/hut.png';
+    const policy = selectFullSyncOrphans({
+      localPaths: [disk],
+      remoteDiskPaths: new Set<string>(),
+      protectedPaths: new Set([disk]),
+      isTracked: () => true,
+    });
+    expect(policy.orphans).toEqual([]);
+  });
+
+  it('would prune that same file without the protection (guards the fix)', () => {
+    const disk = '/game/Assets/Art/library/hut/hut.png';
+    const policy = selectFullSyncOrphans({
+      localPaths: [disk],
+      remoteDiskPaths: new Set<string>(),
+      protectedPaths: new Set<string>(),
+      isTracked: () => true,
+    });
+    expect(policy.orphans).toEqual([disk]);
   });
 });

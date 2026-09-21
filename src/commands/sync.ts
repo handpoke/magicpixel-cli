@@ -6,7 +6,7 @@ import { dirname, relative, resolve } from 'node:path';
 
 import { loadConfig, loadState, saveState, type SyncedSprite, type SyncState } from '../config.js';
 import { ensureEngineConnect } from '../util/engineConnect.js';
-import { fetchManifestSnapshot, fetchAssetBytes, ApiError, getLastProjectInfo, primeManifestEtags, manifestEtagsSnapshot, type ManifestEntry } from '../api.js';
+import { fetchManifestSnapshot, fetchAssetBytes, ApiError, DAILY_QUOTA_ERROR_CODE, getLastProjectInfo, primeManifestEtags, manifestEtagsSnapshot, type ManifestEntry } from '../api.js';
 import { fileSha256 } from '../util/hash.js';
 import { pruneEmptyDirs, walkOutDirPngs } from '../util/paths.js';
 import { createLimit } from '../util/limit.js';
@@ -16,7 +16,7 @@ import { detectProjectKind, isEngineKind } from '../util/framework.js';
 import { indexGamePngs, matchConnectGlobs, GAME_INDEX_CAP_HINT, connectCapMessage, countingSpritesText, type GameIndex, type ScanProgress } from '../util/gameScan.js';
 import { aliasCollisionKeys, collectSourceRelMap, isPathInside, syncDiskPathFromKey } from '../util/syncPath.js';
 import { DEFAULT_UNITY_PPU, writeMissingUnityMetas } from '../util/unityMeta.js';
-import { applyUnityPullPolicy, isWorkingSetEntry, workingSetPullKeys } from '../util/unityFilter.js';
+import { applyUnityPullPolicy, isWorkingSetEntry, partitionWithheldEntries, workingSetPullKeys } from '../util/unityFilter.js';
 import { selectFullSyncOrphans } from '../util/prunePolicy.js';
 import { runTmpJanitor } from '../util/tmpJanitor.js';
 import { friendlyFsError } from '../util/errors.js';
@@ -156,6 +156,8 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
   // "back online" recovery line. Without this flag a user who walked away
   // during an outage has no signal that things are healthy again.
   let pausedForNetwork = false;
+  // Same idea for the daily API allowance: say it once, then wait quietly.
+  let pausedForQuota = false;
   // After this many consecutive 401/403s we give up and exit non-zero so a
   // parent process (Vite plugin, systemd, pm2) can tell the watcher is
   // genuinely broken (revoked key) rather than transiently blipped.
@@ -257,9 +259,11 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
       // another terminal is picked up automatically by the next tick.
       const wasPausedForAuth = pausedForAuth;
       const wasPausedForNetwork = pausedForNetwork;
+      const wasPausedForQuota = pausedForQuota;
       backoffSec = intervalSec;
       pausedForAuth = false;
       pausedForNetwork = false;
+      pausedForQuota = false;
       consecutiveAuthFailures = 0;
       if (wasPausedForAuth && !opts.quiet) {
         process.stdout.write('\x1b[2K\r');
@@ -268,6 +272,12 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
       if (wasPausedForNetwork && !wasPausedForAuth && !opts.quiet) {
         process.stdout.write('\x1b[2K\r');
         console.log(`${kleur.dim(timestamp())} ${kleur.green('✓')} Back online — resuming.`);
+      }
+      if (wasPausedForQuota && !wasPausedForAuth && !wasPausedForNetwork && !opts.quiet) {
+        process.stdout.write('\x1b[2K\r');
+        console.log(
+          `${kleur.dim(timestamp())} ${kleur.green('✓')} Daily allowance available again — resuming.`,
+        );
       }
       const changedCount = r.added.length + r.modified.length + r.removed.length + r.renamed.length;
       // Pushing a locally edited sprite is activity too — it just isn't part of
@@ -305,6 +315,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
         backoffSec,
         pausedForAuth,
         pausedForNetwork,
+        pausedForQuota,
         consecutiveAuthFailures,
         maxAuthFailures: MAX_AUTH_FAILURES,
       });
@@ -342,6 +353,18 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
           );
         }
         pausedForNetwork = true;
+        backoffSec = decision.nextBackoffSec;
+      } else if (decision.kind === 'quota') {
+        consecutiveAuthFailures = 0;
+        if (decision.printMessage) {
+          const idSuffix = apiErr?.requestId ? kleur.dim(` (request id: ${apiErr.requestId})`) : '';
+          console.log(
+            `${kleur.dim(timestamp())} ${kleur.yellow('!')} Daily MagicPixel API allowance reached. ` +
+              `Sprites you already have still work. Resets in ${formatQuotaReset(decision.resetSec)} ` +
+              `(00:00 UTC); checking again every ${Math.max(1, Math.round(decision.nextBackoffSec / 60))} min.${idSuffix}`,
+          );
+        }
+        pausedForQuota = true;
         backoffSec = decision.nextBackoffSec;
       } else {
         consecutiveAuthFailures = 0;
@@ -425,6 +448,7 @@ export interface TickErrorState {
   backoffSec: number;
   pausedForAuth: boolean;
   pausedForNetwork: boolean;
+  pausedForQuota: boolean;
   consecutiveAuthFailures: number;
   maxAuthFailures: number;
 }
@@ -432,7 +456,22 @@ export interface TickErrorState {
 export type TickErrorDecision =
   | { kind: 'auth'; nextBackoffSec: number; consecutiveAuthFailures: number; giveUp: boolean }
   | { kind: 'network'; nextBackoffSec: number; printMessage: boolean }
+  | { kind: 'quota'; nextBackoffSec: number; printMessage: boolean; resetSec: number }
   | { kind: 'other'; nextBackoffSec: number };
+
+/**
+ * Longest quiet wait while the daily allowance is exhausted. The allowance
+ * resets at UTC midnight, but we re-check periodically so a raised cap (or a
+ * clock/timezone surprise) is picked up without restarting the watcher.
+ */
+export const QUOTA_RECHECK_MAX_SEC = 900;
+
+/** Human reset countdown: "42 min" / "3h 05m". */
+export function formatQuotaReset(resetSec: number): string {
+  const mins = Math.max(1, Math.round(resetSec / 60));
+  if (mins < 60) return `${mins} min`;
+  return `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, '0')}m`;
+}
 
 /**
  * Pure helper: classify a per-tick error and compute the next backoff +
@@ -452,6 +491,17 @@ export function classifyTickError(err: Error, state: TickErrorState): TickErrorD
       nextBackoffSec: 30,
       consecutiveAuthFailures: next,
       giveUp: next >= state.maxAuthFailures,
+    };
+  }
+  if (apiErr?.code === DAILY_QUOTA_ERROR_CODE) {
+    // Nothing recovers until the allowance resets, so stop hammering: each
+    // retry still burns a request against the daily request allowance.
+    const resetSec = Math.max(1, Math.round((apiErr.retryAfterMs ?? 0) / 1000));
+    return {
+      kind: 'quota',
+      nextBackoffSec: Math.min(QUOTA_RECHECK_MAX_SEC, resetSec),
+      printMessage: !state.pausedForQuota,
+      resetSec,
     };
   }
   if (isNetworkError(err)) {
@@ -533,6 +583,9 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     : null;
   if (!spinner) onStatus?.(since ? 'Checking MagicPixel for edits…' : 'Fetching your sprites from MagicPixel…');
   let manifest: ManifestEntry[];
+  /** In-scope documents withheld by the server (unreleased edits): hold-only. */
+  let withheldEntries: ManifestEntry[] = [];
+
   // Composite keys the cloud reports as gone (document trashed / componentized)
   // since our cursor. Empty on --full, where the manifest itself is the truth.
   let removedRemoteKeys: string[] = [];
@@ -558,9 +611,17 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       since = undefined;
       snapshot = await fetchManifestSnapshot(config, undefined, onManifestProgress);
     }
-    manifest = snapshot.entries;
+    // Documents the user hasn't released with the editor's Sync button are
+    // listed but not syncable: they stay out of every pull/prune decision and
+    // only protect what's already on disk (see `withheldDirs` below).
+    const partitioned = partitionWithheldEntries(snapshot.entries);
+    manifest = partitioned.entries;
+    withheldEntries = partitioned.withheld;
     removedRemoteKeys = snapshot.removedKeys;
-    observedUpdatedAt = maxIsoTimestamp(manifest.map((e) => e.updated_at));
+    // Cursor advances past withheld rows too — they are re-listed whenever the
+    // user presses Sync (the release bumps `updated_at`).
+    observedUpdatedAt = maxIsoTimestamp(snapshot.entries.map((e) => e.updated_at));
+
 
     const projectInfo = getLastProjectInfo();
     const projectSuffix = projectInfo && verbose
@@ -634,7 +695,19 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   }
   const pathForKey = (key: string): string =>
     syncDiskPathFromKey(config.outDir, key, sourceByKey);
+  // Every folder on disk that belongs to a withheld document. Anything already
+  // written there is held as-is: unreleased edits must never pull, and a full
+  // reconcile must never read the absence of these entries as "deleted".
+  const withheldDirs = new Set<string>();
+  for (const entry of withheldEntries) {
+    try {
+      withheldDirs.add(dirname(pathForKey(entry.key)));
+    } catch {
+      /* unusable key — nothing to protect */
+    }
+  }
   const workingSet = workingSetPullKeys(sourceByKey, state.synced);
+
   // Files whose artboard is no longer flagged for Unity. Deleted even in
   // incremental mode: un-checking the box in the editor must actually remove
   // the sprite from the game project, not leave a stale copy behind.
@@ -838,13 +911,20 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   // Sprites created in Unity (or any PNG we never pulled) are pending a
   // push into MagicPixel, not orphans — see prunePolicy.ts.
   if (!since) {
+    const protectedPaths = new Set(unknownFlagPaths);
+    if (withheldDirs.size > 0) {
+      for (const local of localPngs) {
+        if (withheldDirs.has(dirname(local.abs))) protectedPaths.add(local.abs);
+      }
+    }
     const policy = selectFullSyncOrphans({
       localPaths: localPngs.map((a) => a.abs),
       remoteDiskPaths,
-      protectedPaths: unknownFlagPaths,
+      protectedPaths,
       isTracked: (p) => keyByPath.has(p),
     });
     orphans = policy.orphans;
+
   }
 
   // Heuristic-rename fallback for incremental mode.
@@ -902,8 +982,11 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   // local-edit guard applied below. De-duplicates vs the full-sync orphan list.
   const orphanSet = new Set(orphans);
   const addOrphan = (p: string) => {
+    // Withheld documents are held whole: no prune source may touch them.
+    if (withheldDirs.has(dirname(p))) return;
     if (existsSync(p) && isPathInside(p, outRoot)) orphanSet.add(p);
   };
+
   for (const p of renameStalePaths) addOrphan(p);
   // Un-checked "Sync to Unity" artboards: their PNG (and .meta) leaves the
   // Unity project on the next sync, incremental or not. Working-set originals
@@ -999,8 +1082,14 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   for (const e of manifest) {
     if (e.folder) knownFolderSlugs.add(e.folder.split('/')[0]);
   }
+  // Withheld docs are absent from `manifest` — without their slugs a sibling
+  // folder like `tiles-2/` would read as a legacy suffix collision.
+  for (const e of withheldEntries) {
+    if (e.folder) knownFolderSlugs.add(e.folder.split('/')[0]);
+  }
   for (const key of Object.values(previousAssets)) {
     const top = key.split('/')[0];
+
     if (top) knownFolderSlugs.add(top);
   }
   const legacyFolders = await findLegacySuffixFolders(config.outDir, knownFolderSlugs);

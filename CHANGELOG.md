@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.22] — 2026-09-14
+
+- Raised the daily sprite download allowance from 1 GiB to 10 GiB for large
+  projects.
+- Daily allowance exhaustion now stops the current request with its UTC reset
+  time instead of sleeping inside `sync --watch` and appearing frozen. Short
+  burst limits continue to retry automatically.
+- `sync --watch` now reports an exhausted allowance once, with a countdown to
+  the reset, then re-checks every 15 minutes instead of retrying every minute
+  all night (each retry counted against the daily request allowance).
+- Allowance messages now say "API allowance" — the same limit covers requests
+  as well as downloaded bytes.
+
 ## [0.5.21] — 2026-09-14
 
 - `sync --watch` can no longer hang forever: every network request now has a

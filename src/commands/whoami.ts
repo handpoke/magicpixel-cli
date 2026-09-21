@@ -1,6 +1,6 @@
 import kleur from 'kleur';
 import { loadConfig, defaultConfig, resolveEndpoint, getApiKey, type MagicPixelConfig } from '../config.js';
-import { ApiError, retryTransient, retryAfterMsFromResponse, getLastProjectInfo, type ManifestProjectInfo } from '../api.js';
+import { ApiError, errorCodeFromResponse, friendlyApiError, retryTransient, retryAfterMsFromResponse, getLastProjectInfo, type ManifestProjectInfo } from '../api.js';
 import { safeFetch } from '../util/security.js';
 import { authHeaders } from '../util/authHeaders.js';
 
@@ -45,9 +45,16 @@ export async function whoamiCommand(): Promise<void> {
     }
     if (res.status >= 500 || res.status === 429) {
       const bodyText = await res.text();
+      const errorCode = errorCodeFromResponse(res);
       // Pass Retry-After through so retryTransient honours server back-pressure
       // (matches fetchManifestPage / fetchAssetBytes).
-      throw new ApiError(res.status, bodyText.slice(0, 200), serverRequestId, retryAfterMsFromResponse(res));
+      throw new ApiError(
+        res.status,
+        friendlyApiError(res.status, bodyText, 'whoami', errorCode),
+        serverRequestId,
+        retryAfterMsFromResponse(res),
+        errorCode,
+      );
     }
     if (!res.ok) {
       const bodyText = await res.text();

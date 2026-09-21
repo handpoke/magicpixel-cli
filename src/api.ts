@@ -29,6 +29,13 @@ export interface ManifestEntry {
   /** Per-artboard "Sync to Unity" opt-in. Absent on older edge deploys —
    *  callers must treat `undefined` as "unknown", not "off". */
   unity?: boolean;
+  /**
+   * In sync scope, but edited since the user last pressed Sync in the editor.
+   * Not downloadable (no `download_url`): the CLI must hold whatever it already
+   * wrote for this document — never pull it, never count it as an orphan.
+   */
+  withheld?: boolean;
+
   /** Row id + artboard index — the address `push` writes a disk edit back to. */
   asset_id?: string;
   layer_idx?: number;
@@ -155,12 +162,20 @@ export class ApiError extends Error {
     message: string,
     public requestId?: string,
     public retryAfterMs?: number,
+    public code?: string,
   ) {
     super(message);
   }
 }
 
-function friendly(status: number, body: string, context: string): string {
+export const DAILY_QUOTA_ERROR_CODE = 'daily_quota_exceeded';
+
+/** Stable API error code; the response body retains legacy text for old CLIs. */
+export function errorCodeFromResponse(res: Response): string | undefined {
+  return res.headers.get('x-magicpixel-error-code') ?? undefined;
+}
+
+export function friendlyApiError(status: number, body: string, context: string, code?: string): string {
   if (status === 401 || status === 403) {
     return (
       `${context}: ${status} — API key rejected.\n` +
@@ -174,6 +189,9 @@ function friendly(status: number, body: string, context: string): string {
     );
   }
   if (status === 429) {
+    if (code === DAILY_QUOTA_ERROR_CODE) {
+      return `${context}: daily MagicPixel API allowance reached. Resets at 00:00 UTC.`;
+    }
     return `${context}: 429 — rate limited. Retry shortly.`;
   }
   if (status === 546) {
@@ -278,11 +296,13 @@ export async function fetchManifestPage(opts: FetchManifestOpts): Promise<Manife
       return data as ManifestResponse;
     }
     const bodyText = await res.text();
+    const errorCode = errorCodeFromResponse(res);
     throw new ApiError(
       res.status,
-      withRequestId(friendly(res.status, bodyText, 'manifest'), serverRequestId),
+      withRequestId(friendlyApiError(res.status, bodyText, 'manifest', errorCode), serverRequestId),
       serverRequestId,
       retryAfterMsFromResponse(res),
+      errorCode,
     );
   }, { max546Attempts: 7 });
 }
@@ -327,6 +347,9 @@ export async function retryTransient<T>(
       const err = e as Error;
       if (err instanceof ApiError) {
         if (err.status < 500 && err.status !== 429) throw err;
+        // A daily allowance cannot recover during this request. In particular,
+        // never honour its hours-long Retry-After inside a single watch tick.
+        if (err.code === DAILY_QUOTA_ERROR_CODE) throw err;
         lastErr = err;
         nextDelayMs = err.retryAfterMs ?? 0;
       } else {
@@ -475,11 +498,13 @@ export async function fetchAssetBytes(
     }
     if (res.ok) return await readBodyWithLimit(res, MAX_ASSET_BYTES);
     const bodyText = await res.text();
+    const errorCode = errorCodeFromResponse(res);
     throw new ApiError(
       res.status,
-      withRequestId(friendly(res.status, bodyText, `download ${key}`), serverRequestId),
+      withRequestId(friendlyApiError(res.status, bodyText, `download ${key}`, errorCode), serverRequestId),
       serverRequestId,
       retryAfterMsFromResponse(res),
+      errorCode,
     );
   });
 }
@@ -575,11 +600,13 @@ export async function pushSprites(
       return results as PushResult[];
     }
     const bodyText = await res.text();
+    const errorCode = errorCodeFromResponse(res);
     throw new ApiError(
       res.status,
-      withRequestId(friendly(res.status, bodyText, 'push'), serverRequestId),
+      withRequestId(friendlyApiError(res.status, bodyText, 'push', errorCode), serverRequestId),
       serverRequestId,
       retryAfterMsFromResponse(res),
+      errorCode,
     );
   }, retryOpts);
 }

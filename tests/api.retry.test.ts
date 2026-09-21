@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ApiError, retryTransient } from '../src/api.js';
+import { ApiError, DAILY_QUOTA_ERROR_CODE, retryTransient } from '../src/api.js';
 
 describe('retryTransient', () => {
   it('returns the first successful result without retrying', async () => {
@@ -29,6 +29,22 @@ describe('retryTransient', () => {
       .mockResolvedValueOnce('ok');
     await expect(retryTransient('ctx', fn)).resolves.toBe('ok');
     expect(fn).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry or sleep for the daily quota 429', async () => {
+    const sleep = vi.fn(async () => {});
+    const err = new ApiError(
+      429,
+      'Daily download quota exceeded. Resets at 00:00 UTC.',
+      'req-quota',
+      43_200_000,
+      DAILY_QUOTA_ERROR_CODE,
+    );
+    const fn = vi.fn().mockRejectedValue(err);
+
+    await expect(retryTransient('manifest', fn, sleep)).rejects.toBe(err);
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
   });
 
   it('honors retryAfterMs over the default backoff', async () => {
