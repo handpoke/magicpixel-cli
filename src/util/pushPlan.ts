@@ -159,7 +159,7 @@ export function applyDiskFingerprints(
 export function planPush(
   candidates: readonly PushCandidate[],
   synced: Record<string, SyncedSprite> | undefined,
-  opts: { flatten?: boolean; folderTreeKeys?: ReadonlySet<string> } = {},
+  opts: { flatten?: boolean; folderTreeKeys?: ReadonlySet<string>; replace?: boolean } = {},
 ): PushAction[] {
   const state = synced ?? {};
   const byRel = indexSyncedBySourceRel(state);
@@ -172,11 +172,13 @@ export function planPush(
         c.sourceRel || opts.folderTreeKeys?.has(c.key) || (stateKey != null && opts.folderTreeKeys?.has(stateKey)),
       );
       const lastDisk = lastPushedDiskSha(known, { connected });
-      if (lastDisk === c.diskSha256) {
+      // Resync (replace) sends every in-scope sprite: local wins even when
+      // only the MagicPixel copy changed. The server reports true no-ops.
+      if (lastDisk === c.diskSha256 && !opts.replace) {
         out.push({ kind: 'skip', key: c.key, reason: 'unchanged' });
         continue;
       }
-      if (lastDisk === undefined) {
+      if (lastDisk === undefined && !opts.replace) {
         // Connected original with no disk baseline yet. Ingest's composite
         // sha is not the game file — seeding happens in `applyDiskFingerprints`.
         out.push({ kind: 'skip', key: c.key, reason: 'unchanged' });

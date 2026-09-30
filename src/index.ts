@@ -15,6 +15,7 @@ import { doctorCommand } from './commands/doctor.js';
 import { repairCommand } from './commands/repair.js';
 import { startCommand } from './commands/start.js';
 import { connectCommand } from './commands/connect.js';
+import { resyncCommand } from './commands/resync.js';
 import { searchCommand } from './commands/search.js';
 import { parseWatchInterval, parseConcurrency } from './util/flagValidators.js';
 import { CLI_VERSION } from './version.js';
@@ -114,6 +115,14 @@ program
   .option('--force', 'Keep your local copy when a sprite also changed in MagicPixel')
   .addHelpText('after', '\nExamples:\n  $ magicpixel push --dry-run      # see what changed on disk\n  $ magicpixel push                # send local edits + new sprites\n  $ magicpixel push --force        # your local copy wins on both-sides-changed\n')
   .action(wrap("push", async (opts) => pushCommand(opts as Parameters<typeof pushCommand>[0])));
+
+program
+  .command('resync <folder>')
+  .description('Make one MagicPixel folder match your local game folder (local wins, missing files go to Trash)')
+  .option('-y, --yes', 'Skip the confirmation question')
+  .option('--dry-run', 'Show what would change without sending anything')
+  .addHelpText('after', '\nExamples:\n  $ magicpixel resync Sprites/Enemies --dry-run\n  $ magicpixel resync Sprites/Enemies\n')
+  .action(wrap("resync", async (folder: string, opts) => resyncCommand(folder, opts as Parameters<typeof resyncCommand>[1])));
 
 program
   .command('connect <glob>')

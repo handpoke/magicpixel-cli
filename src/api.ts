@@ -543,6 +543,8 @@ export interface PushSprite {
   layerIdx?: number;
   baseSha256?: string | null;
   flatten?: boolean;
+  /** Folder resync: local wins, no cloud-changed refusal, size follows the PNG. */
+  replace?: boolean;
   /** ADOPT form: [...libraryFolders, docSlug, artboardSlug]. */
   path?: string[];
   pathNames?: string[];
@@ -650,4 +652,60 @@ export async function pushSpritesAdaptive(
       return [...left, ...right];
     }
   }
+}
+
+// ---------- folder resync (local folder is the source of truth) -------------
+
+export function resolveResyncEndpoint(): string {
+  return resolveIngestEndpoint().replace(/\/ingest$/, '/resync');
+}
+
+async function postResync<T>(body: Record<string, unknown>): Promise<T> {
+  const url = resolveResyncEndpoint();
+  return retryTransient('resync', async () => {
+    const { headers, requestId } = buildHeaders({ 'Content-Type': 'application/json' });
+    const res = await safeFetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+    const serverRequestId = res.headers.get('x-request-id') ?? requestId;
+    if (res.ok) return (await res.json()) as T;
+    const text = await res.text();
+    throw new ApiError(
+      res.status,
+      withRequestId(friendlyApiError(res.status, text, 'resync', errorCodeFromResponse(res)), serverRequestId),
+      serverRequestId,
+    );
+  });
+}
+
+export interface PruneResponse {
+  folderFound: boolean;
+  trashed: number;
+  wouldTrash: string[];
+}
+
+export function pruneResyncFolder(
+  folderPath: string[],
+  keepAssetIds: string[],
+  dryRun: boolean,
+): Promise<PruneResponse> {
+  return postResync({ action: 'prune', folderPath, keepAssetIds, dryRun });
+}
+
+export interface ClaimedResync {
+  id: string;
+  folderPath: string[];
+  folderName: string;
+}
+
+export async function claimResyncRequest(): Promise<ClaimedResync | null> {
+  const r = await postResync<{ request: ClaimedResync | null }>({ action: 'claim' });
+  return r.request ?? null;
+}
+
+export async function reportResyncRequest(
+  id: string,
+  status: 'done' | 'failed',
+  message: string | null,
+  counts?: Record<string, number>,
+): Promise<void> {
+  await postResync({ action: 'report', id, status, message, counts });
 }

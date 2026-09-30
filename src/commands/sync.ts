@@ -29,6 +29,43 @@ import { canSkipWithoutHashing, decidePull, hasNewExplicitRelease } from '../uti
 import { hasUnpushedLocalEdit } from '../util/localEdit.js';
 import { shouldReconcile } from '../util/reconcile.js';
 import { runPush, type PushSummary } from './push.js';
+import { claimResyncRequest, reportResyncRequest } from '../api.js';
+import { runResync } from './resync.js';
+
+/** How often the watcher asks for a library "Resync from game" request. */
+const RESYNC_POLL_MS = 15_000;
+let lastResyncPollAt = 0;
+
+/**
+ * Run one queued library "Resync from game…" request, if any. Never throws:
+ * a failed resync is reported back to MagicPixel and the watcher keeps going.
+ */
+async function maybeRunQueuedResync(quiet: boolean): Promise<void> {
+  if (Date.now() - lastResyncPollAt < RESYNC_POLL_MS) return;
+  lastResyncPollAt = Date.now();
+  let req: Awaited<ReturnType<typeof claimResyncRequest>> = null;
+  try {
+    req = await claimResyncRequest();
+  } catch {
+    return;
+  }
+  if (!req) return;
+  if (!quiet) {
+    process.stdout.write('\x1b[2K\r');
+    console.log(kleur.bold(`↻ Resyncing "${req.folderName}" from your game (requested in MagicPixel)…`));
+  }
+  try {
+    const out = await runResync(req.folderPath, { yes: true, quiet });
+    const p = out.push;
+    await reportResyncRequest(req.id, 'done', out.pruneSkipped ? `Nothing trashed: ${out.pruneSkipped}` : null, {
+      created: p.created, updated: p.updated, unchanged: p.unchanged,
+      conflict: p.conflict, error: p.error, trashed: out.trashed,
+    });
+  } catch (e) {
+    await reportResyncRequest(req.id, 'failed', (e as Error).message).catch(() => {});
+    if (!quiet) console.log(kleur.red(`! Resync failed: ${(e as Error).message}`));
+  }
+}
 
 interface SyncOpts {
   prune?: boolean;  // commander: defaults true; --no-prune sets false
@@ -265,6 +302,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
       pausedForNetwork = false;
       pausedForQuota = false;
       consecutiveAuthFailures = 0;
+      await maybeRunQueuedResync(opts.quiet === true);
       if (wasPausedForAuth && !opts.quiet) {
         process.stdout.write('\x1b[2K\r');
         console.log(`${kleur.dim(timestamp())} ${kleur.green('✓')} Key accepted again — resuming.`);

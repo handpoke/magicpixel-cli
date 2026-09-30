@@ -46,6 +46,10 @@ export interface PushOpts {
   excludeKeys?: ReadonlySet<string>;
   /** "My local copy wins": re-send refused sprites with the live cloud sha. */
   force?: boolean;
+  /** Folder resync: every matching local file overwrites its MagicPixel copy. */
+  replace?: boolean;
+  /** Only consider these keys (folder resync scope). */
+  keyFilter?: (key: string) => boolean;
 }
 
 export interface PushSummary {
@@ -55,6 +59,10 @@ export interface PushSummary {
   conflict: number;
   error: number;
   imported: number;
+  /** Library files that now mirror a local file in scope (resync prune keep-list). */
+  keptAssetIds: string[];
+  /** Local sprites in scope (after keyFilter). */
+  scanned: number;
 }
 
 export async function pushCommand(opts: PushOpts = {}): Promise<void> {
@@ -78,7 +86,10 @@ export async function runPushWith(
   opts: PushOpts = {},
 ): Promise<PushSummary> {
   const quiet = opts.quiet === true;
-  const empty: PushSummary = { created: 0, updated: 0, unchanged: 0, conflict: 0, error: 0, imported: 0 };
+  if (opts.replace) opts = { ...opts, flatten: true };
+  const empty: PushSummary = {
+    created: 0, updated: 0, unchanged: 0, conflict: 0, error: 0, imported: 0, keptAssetIds: [], scanned: 0,
+  };
 
   const spinner = quiet ? null : ora(countingSpritesText(0)).start();
   const kind = await detectProjectKind();
@@ -150,7 +161,7 @@ export async function runPushWith(
         const segments = entry
           ? entry.adoptRel.replace(/\.png$/i, '').split('/')
           : key.split('/');
-        if (opts.excludeKeys?.has(key)) {
+        if (opts.excludeKeys?.has(key) || (opts.keyFilter && !opts.keyFilter(key))) {
           reportHash();
           return;
         }
@@ -171,7 +182,7 @@ export async function runPushWith(
   for (const k of absByKey.keys()) {
     if (sourceByKey.has(k)) folderTreeKeys.add(k);
   }
-  const actions = planPush(candidates, state.synced, { flatten: opts.flatten, folderTreeKeys });
+  const actions = planPush(candidates, state.synced, { flatten: opts.flatten, folderTreeKeys, replace: opts.replace });
   const skipped = actions.filter((a) => a.kind === 'skip' && a.reason !== 'legacy').length;
   const legacy = actions.filter((a) => a.kind === 'skip' && a.reason === 'legacy');
   const flattenBlocked = actions.filter((a) => a.kind === 'needs-flatten');
@@ -221,7 +232,10 @@ export async function runPushWith(
   if (sendable.length === 0) {
     await persistDiskFingerprints(state, candidates);
     if (!quiet) console.log(kleur.green('✓ nothing to push.'));
-    return { ...empty, imported: matched.entries.length, unchanged: skipped };
+    return {
+      ...empty, imported: matched.entries.length, unchanged: skipped,
+      keptAssetIds: collectKeptAssetIds(candidates, state.synced ?? {}, []), scanned: candidates.length,
+    };
   }
 
   if (opts.dryRun) {
@@ -233,7 +247,10 @@ export async function runPushWith(
       }
       console.log(kleur.dim('--dry-run: nothing sent.'));
     }
-    return { ...empty, imported: matched.entries.length };
+    return {
+      ...empty, imported: matched.entries.length,
+      keptAssetIds: collectKeptAssetIds(candidates, state.synced ?? {}, []), scanned: candidates.length,
+    };
   }
 
   const outRoot = resolve(process.cwd(), config.outDir);
@@ -255,9 +272,13 @@ export async function runPushWith(
         layerIdx: a.layerIdx,
         baseSha256: a.baseSha256,
         flatten: opts.flatten === true,
+        ...(opts.replace ? { replace: true } : {}),
       });
     } else if (a.kind === 'adopt') {
-      sprites.push({ key: a.key, pngBase64, diskSha256, path: a.path, pathNames: a.pathNames, name: a.name });
+      sprites.push({
+        key: a.key, pngBase64, diskSha256, path: a.path, pathNames: a.pathNames, name: a.name,
+        ...(opts.replace ? { replace: true } : {}),
+      });
     }
   }
 
@@ -352,7 +373,30 @@ export async function runPushWith(
     }
   }
   if (failed) process.exitCode = 1;
-  return { ...counts, imported: matched.entries.length };
+  return {
+    ...counts, imported: matched.entries.length,
+    keptAssetIds: collectKeptAssetIds(candidates, synced, results), scanned: candidates.length,
+  };
+}
+
+/**
+ * Library documents that now mirror an in-scope local file: every successful
+ * push result, plus unchanged candidates already recorded in sync state.
+ */
+export function collectKeptAssetIds(
+  candidates: readonly Pick<PushCandidate, 'key'>[],
+  synced: Readonly<Record<string, SyncedSprite>>,
+  results: readonly PushResult[],
+): string[] {
+  const out = new Set<string>();
+  for (const r of results) {
+    if (r.assetId && (r.status === 'created' || r.status === 'updated' || r.status === 'unchanged')) out.add(r.assetId);
+  }
+  for (const c of candidates) {
+    const id = synced[c.key]?.assetId;
+    if (id) out.add(id);
+  }
+  return [...out];
 }
 
 /**

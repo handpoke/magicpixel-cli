@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.29]
+
+### Fixed
+- Ship `magicpixel resync <folder>`: the npm 0.5.28 build was published before the command landed.
+
+## [0.5.28]
+
+### Added
+- `magicpixel resync <folder>` (`--dry-run`, `--yes`): make one MagicPixel folder match the local game folder. Local files overwrite their MagicPixel copies (size follows the file); files missing locally move to Trash. Nothing is trashed if any upload fails or the game scan was capped.
+- `sync --watch` runs "Resync from game…" requests queued from the library folder menu.
+
 ## [0.5.27] — 2026-09-21
 
 - Fixed Sync presses that changed only an artboard selection being skipped as

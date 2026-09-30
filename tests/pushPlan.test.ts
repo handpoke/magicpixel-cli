@@ -281,3 +281,10 @@ describe('applyDiskFingerprints', () => {
     expect(next['sprites/hero/hero']).toBeUndefined();
   });
 });
+
+describe('planPush replace (resync)', () => {
+  it('sends unchanged sprites so local wins over MagicPixel-only edits', () => {
+    const [a] = planPush([candidate('characters/hero/walk', 'same')], synced, { replace: true, flatten: true });
+    expect(a).toMatchObject({ kind: 'update', assetId: 'a1', layerIdx: 1 });
+  });
+});
