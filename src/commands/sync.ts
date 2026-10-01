@@ -4,7 +4,7 @@ import { mkdir, unlink, readdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
 
-import { loadConfig, loadState, saveState, type SyncedSprite, type SyncState } from '../config.js';
+import { loadConfig, loadState, saveState, resetStateIfProjectChanged, PROJECT_CHANGED_MESSAGE, type SyncedSprite, type SyncState } from '../config.js';
 import { ensureEngineConnect } from '../util/engineConnect.js';
 import { fetchManifestSnapshot, fetchAssetBytes, ApiError, DAILY_QUOTA_ERROR_CODE, getLastProjectInfo, primeManifestEtags, manifestEtagsSnapshot, type ManifestEntry } from '../api.js';
 import { fileSha256 } from '../util/hash.js';
@@ -31,6 +31,7 @@ import { shouldReconcile } from '../util/reconcile.js';
 import { runPush, type PushSummary } from './push.js';
 import { claimResyncRequest, reportResyncRequest } from '../api.js';
 import { runResync } from './resync.js';
+import { keyInScope, pathInScope, resolveSyncScope, scopeFingerprint } from '../util/syncScope.js';
 
 /** How often the watcher asks for a library "Resync from game" request. */
 const RESYNC_POLL_MS = 15_000;
@@ -74,6 +75,8 @@ interface SyncOpts {
   concurrency?: number;
   watch?: boolean | string;
   quiet?: boolean;
+  /** `--only <folder>`: limit push/pull/prune to these game folders. */
+  only?: string[];
 }
 
 interface RenameInfo {
@@ -160,6 +163,14 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
   // manifest fetch fails we still want the loop to come up and retry.
   console.log(kleur.bold('👀 MagicPixel watching for changes…'));
   console.log(`   Edit at:  ${kleur.cyan('https://magicpixel.art')}`);
+  try {
+    const scope = resolveSyncScope(opts.only ?? (await loadConfig()).syncOnly);
+    if (scope) {
+      console.log(`   Only:     ${scope.folders.length} folder${scope.folders.length === 1 ? '' : 's'}: ${kleur.cyan(scope.folders.join(', '))}`);
+    }
+  } catch {
+    /* header is cosmetic */
+  }
   let countSpinner: Ora | null = null;
   if (!opts.quiet) {
     try {
@@ -617,6 +628,11 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   if (reconcileDue && verbose) {
     console.log(kleur.dim('Running a full reconcile (periodic) to clear anything deleted in MagicPixel.'));
   }
+  // Folder scope: a changed scope needs one full pass so newly-included
+  // folders aren't skipped by a cursor that advanced while they were held.
+  const scope = resolveSyncScope(opts.only ?? config.syncOnly);
+  const scopeKey = scopeFingerprint(scope);
+  if (scopeKey !== state.syncScope) since = undefined;
   const previousAssets = state.assets ?? {};  // id → key from prior sync
 
   const spinner: Ora | null = verbose
@@ -665,6 +681,11 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
 
 
     const projectInfo = getLastProjectInfo();
+    // Full read + empty project is the only safe "cloud is empty" signal.
+    if (resetStateIfProjectChanged(state, projectInfo?.id, !since && snapshot.entries.length === 0)) {
+      await saveState(state);
+      if (verbose) console.log(kleur.yellow(`! ${PROJECT_CHANGED_MESSAGE}`));
+    }
     const projectSuffix = projectInfo && verbose
       ? kleur.dim(` · project: ${projectInfo.name ?? projectInfo.id.slice(0, 8)}`)
       : '';
@@ -716,8 +737,40 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
         })
       : { files: [], capped: false });
   if (!runOpts.gameIndex) runOpts.onGameIndex?.(gameIndex);
-  const connected = matchConnectGlobs(gameIndex, config.connect ?? []);
+  const fullGameIndex = gameIndex;
+  const scopedGameIndex: GameIndex = scope
+    ? { ...fullGameIndex, files: fullGameIndex.files.filter((f) => pathInScope(scope, f.sourceRel)) }
+    : fullGameIndex;
+  const connected = matchConnectGlobs(scopedGameIndex, config.connect ?? []);
   const sourceByKey = collectSourceRelMap(connected.entries, state.synced);
+  if (scope) {
+    // Out-of-scope rows become hold-only: never pulled, and their folders are
+    // protected from every prune path exactly like unreleased documents.
+    const inScope: ManifestEntry[] = [];
+    for (const e of manifest) {
+      const rel = sourceByKey.get(e.key) ?? state.synced?.[e.key]?.sourceRel;
+      if (keyInScope(scope, e.key, rel)) inScope.push(e);
+      else withheldEntries.push(e);
+    }
+    manifest = inScope;
+    removedRemoteKeys = removedRemoteKeys.filter((k) =>
+      keyInScope(scope, k, sourceByKey.get(k) ?? state.synced?.[k]?.sourceRel),
+    );
+    if (scopedGameIndex.files.length === 0 && manifest.length === 0) {
+      const msg =
+        `Nothing found in ${scope.folders.join(', ')}.\n` +
+        `  Fix: check the folder path (relative to ${process.cwd()}, e.g. Runtime/Sprites/Entities/decorations).`;
+      // Watch would hit this on every tick — say it once and stop.
+      if (runOpts.watchMode) {
+        console.error(kleur.red(msg));
+        process.exit(1);
+      }
+      throw new Error(msg);
+    }
+    if (verbose) {
+      console.log(kleur.dim(`  only ${scope.folders.join(', ')} → ${connected.entries.length} game file${connected.entries.length === 1 ? '' : 's'} · ${manifest.length} in MagicPixel`));
+    }
+  }
   aliasCollisionKeys(sourceByKey, manifest.map((e) => e.key));
   if (verbose && gameIndex.capped) {
     console.log(kleur.yellow(`! ${GAME_INDEX_CAP_HINT}`));
@@ -1080,6 +1133,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   const keptFromPrune: string[] = [];
   for (const p of orphanSet) {
     if (conflictPaths.has(p)) continue;
+    if (scope && !pathInScope(scope, p)) continue; // outside --only: hands off
     const key = keyByPath.get(p);
     if (
       key &&
@@ -1128,7 +1182,8 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
 
     if (top) knownFolderSlugs.add(top);
   }
-  const legacyFolders = await findLegacySuffixFolders(config.outDir, knownFolderSlugs);
+  const legacyFolders = (await findLegacySuffixFolders(config.outDir, knownFolderSlugs))
+    .filter((lf) => !scope || pathInScope(scope, lf.abs)); // --only: hands off elsewhere
 
   if (verbose) {
     console.log();
@@ -1448,6 +1503,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     assets: nextAssets,
     synced: nextSynced,
     manifestEtags: manifestEtagsSnapshot(),
+    syncScope: scopeKey,
     // A completed full pass is the only run that can prove nothing is orphaned.
     ...(!since && result.failed === 0 ? { lastReconcile: startedAt } : {}),
   };
@@ -1521,7 +1577,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   const pushed = await maybePushLocalSprites(
     config.push,
     verbose,
-    gameIndex,
+    scopedGameIndex,
     live && !!runOpts.watchMode,
     onStatus,
     conflictSet,

@@ -183,7 +183,7 @@ export function friendlyApiError(status: number, body: string, context: string, 
   if (status === 401 || status === 403) {
     return (
       `${context}: ${status} — API key rejected.\n` +
-      `  Fix: regenerate at https://magicpixel.art/settings and re-run \`${cmd('login')}\`.`
+      `  Fix: run \`${cmd('login')}\` and paste a fresh key from https://magicpixel.art/settings.`
     );
   }
   if (status === 404) {

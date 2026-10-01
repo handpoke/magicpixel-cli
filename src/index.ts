@@ -19,6 +19,7 @@ import { resyncCommand } from './commands/resync.js';
 import { searchCommand } from './commands/search.js';
 import { parseWatchInterval, parseConcurrency } from './util/flagValidators.js';
 import { CLI_VERSION } from './version.js';
+import { cmd } from './util/invoke.js';
 
 // Node version guard
 const major = Number(process.versions.node.split('.')[0]);
@@ -59,6 +60,7 @@ program
   .command('start')
   .description('One-command first-run setup: init + login + first sync')
   .option('--force', 'Re-run init even if magicpixel.json exists')
+  .option('--folder <path>', 'Sync only this game folder first (skips the "all or one folder" question)')
   .action(wrap("start", async (opts) => startCommand(opts)));
 
 program
@@ -104,8 +106,18 @@ program
   .option('-w, --watch [seconds]', 'Poll for changes (default 2s; auto-slows to 5s after ~1min idle, 10s after ~5min)', parseWatchInterval as (v: string, prev: unknown) => string)
   .option('-q, --quiet', 'Minimal output (for CI)')
   .option('-c, --concurrency <n>', 'Parallel downloads (1–16, default 6)', parseConcurrency)
-  .addHelpText('after', '\nExamples:\n  $ magicpixel sync                # incremental sync\n  $ magicpixel sync --full         # ignore lastSync, re-check everything\n  $ magicpixel sync -w             # watch mode (2s; adaptive idle backoff; exit 2 after 5 auth failures)\n')
-  .action(wrap("sync", async (opts) => syncCommand(opts as Parameters<typeof syncCommand>[0])));
+  .option('--only <folder...>', 'Only sync these game folders (repeatable), e.g. Runtime/Sprites/Entities/decorations')
+  .argument('[extra...]')
+  .addHelpText('after', '\nExamples:\n  $ magicpixel sync --watch --only Runtime/Sprites/Enemies   # one folder\n  $ magicpixel sync                # incremental sync\n  $ magicpixel sync --full         # ignore lastSync, re-check everything\n  $ magicpixel sync -w             # watch mode (2s; adaptive idle backoff; exit 2 after 5 auth failures)\n')
+  .action(wrap("sync", async (extra: string[], opts) => {
+    if (extra.length > 0) {
+      throw new Error(
+        `sync doesn't take a folder (got "${extra.join(' ')}").\n` +
+          `  Fix: ${cmd(`sync --only ${extra[0].replace(/^\/+/, '')}`)}`,
+      );
+    }
+    return syncCommand(opts as Parameters<typeof syncCommand>[0]);
+  }));
 
 program
   .command('push')

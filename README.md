@@ -32,7 +32,7 @@ Then leave this running while you work:
 npx @magicpixelart/cli sync --watch
 ```
 
-After `npm i -D @magicpixelart/cli` you can type `magicpixel sync --watch`. Connected sprites write back to their original game path. New MagicPixel-only art still lands in `outDir`. To sync only some folders: `npx @magicpixelart/cli connect 'assets/Sprites/**'`.
+After `npm i -D @magicpixelart/cli` you can type `magicpixel sync --watch`. Connected sprites write back to their original game path. New MagicPixel-only art still lands in `outDir`. To sync only some folders: `npx @magicpixelart/cli connect 'assets/Sprites/**'`. To watch just one folder of a huge project: `npx @magicpixelart/cli sync --watch --only Assets/Sprites/Enemies`.
 
 When it finishes:
 
@@ -112,6 +112,7 @@ No bundler config, no runtime, no extra package.
 | `repair [--dry-run] [-y]` | Self-heal a broken sync: validate key → quarantine `state.json` → prune empty dirs → full re-sync. |
 | `sync [...flags]` | Two-way: pull MagicPixel edits and push changed game sprites. |
 | `push [--dry-run] [--flatten]` | Upload local PNG edits (and connected game sprites) back to MagicPixel. |
+| `resync <folder> [--dry-run] [-y]` | Local files win for one folder: overwrite MagicPixel copies, move cloud-only files to Trash. |
 | `connect <glob>` | Limit which game folders sync (default is all sprites on Unity/Godot/GameMaker). |
 | `search <query>` | Search indexed game PNGs (no network). |
 | `add <glob>` / `remove <glob>` | Manage `include` patterns. |
@@ -129,6 +130,7 @@ No bundler config, no runtime, no extra package.
 | `--full` | Ignore `lastSync`; re-fetch the full manifest. |
 | `-c, --concurrency <n>` | Parallel downloads (1–16, default 6). |
 | `-q, --quiet` | Minimal output (for CI). |
+| `--only <folder...>` | Only push, pull and prune inside these game folders (repeatable). Everything else is left untouched. |
 
 Each successful sync prints a per-file change list (`+` added, `~` modified, `↪` renamed, `-` pruned) so you (and any AI agent reading the logs) know exactly what to wire up.
 
@@ -139,6 +141,14 @@ Sync is built to be cheap: a no-op run is one small manifest request, zero PNG b
 - `lastSync` in `.magicpixel/state.json` → incremental manifest fetch (`?since=…`).
 - Atomic writes (`*.tmp` → `rename`) survive crashes mid-write.
 - Retry with backoff on 429/5xx; `lastSync` only advances on a clean run.
+
+### Sync one folder of a big project
+
+```bash
+npx @magicpixelart/cli sync --watch --only Runtime/Sprites/Entities/decorations
+```
+
+Only that folder is pushed, pulled, or pruned. Every other file stays exactly as it is. Repeat `--only` for more folders, or set `"syncOnly"` in `magicpixel.json`. Changing the folder list triggers one full check. `sync <folder>` without `--only` stops with an error instead of syncing everything.
 
 ## Config (`magicpixel.json`)
 
@@ -151,6 +161,7 @@ Sync is built to be cheap: a no-op run is one small manifest request, zero PNG b
 | `emitIndex`| `boolean`  | `true`                  | Emit `<outDir>/index.ts` with typed asset map.   |
 | `unityPpu` | `number?`  | `32`                    | Unity only: pixels-per-unit in generated `.meta`. |
 | `push`     | `boolean?` | `true`                  | Upload local PNG changes (outDir + `connect` working set) to MagicPixel on every `sync`. Set `false` for pull-only. |
+| `syncOnly` | `string[]?` | — | Default for `sync --only`: folders a plain `sync` is limited to. |
 | `endpoint` | `string?`  | production URL          | Override the API base (testing only). Must be **HTTPS**. |
 
 State (`.magicpixel/state.json`) tracks `lastSync` (file mode `0600`). Add `.magicpixel/` to `.gitignore` (init offers to do this).

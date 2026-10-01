@@ -30,6 +30,8 @@ export interface MagicPixelConfig {
    * all sprites (`**`) on first sync. Narrow with `magicpixel connect <glob>`.
    */
   connect: string[];
+  /** Optional default for `sync --only`: game folders a plain `sync` is limited to. */
+  syncOnly?: string[];
 }
 
 /**
@@ -106,7 +108,40 @@ export interface SyncState {
    * full reconcile is promoted periodically to clear orphaned PNGs.
    */
   lastReconcile?: string;
+  /** MagicPixel project the upload record belongs to (from the manifest). */
+  projectId?: string;
+  /** Fingerprint of the `--only` scope the cursor belongs to. */
+  syncScope?: string;
 }
+
+/**
+ * The upload record is only valid for the project it was built against. A new
+ * key / account / project must not inherit "already uploaded" entries, or every
+ * sprite is skipped as unchanged and nothing reaches the new project.
+ * Legacy records (no projectId) are treated as stale when the server reports
+ * an empty project. Mutates `state`; returns true when it was reset. Disk is
+ * never touched.
+ */
+export function resetStateIfProjectChanged(
+  state: SyncState,
+  projectId: string | null | undefined,
+  cloudIsEmpty: boolean,
+): boolean {
+  if (!projectId) return false;
+  const hasRecord = Object.keys(state.synced ?? {}).length > 0 || Object.keys(state.assets ?? {}).length > 0;
+  const stale = state.projectId ? state.projectId !== projectId : hasRecord && cloudIsEmpty;
+  if (stale) {
+    delete state.synced;
+    delete state.assets;
+    delete state.manifestEtags;
+    delete state.lastReconcile;
+  }
+  state.projectId = projectId;
+  return stale;
+}
+
+export const PROJECT_CHANGED_MESSAGE =
+  'This key belongs to a different MagicPixel project — re-uploading your connected folders.';
 
 export const defaultConfig: MagicPixelConfig = {
   outDir: 'src/assets/magicpixel',
@@ -205,6 +240,7 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<MagicPixe
     unityPpu,
     push: parsed.push === false ? false : undefined,
     connect,
+    ...(parsed.syncOnly !== undefined ? { syncOnly: normalizeGlobList(parsed.syncOnly, 'syncOnly') } : {}),
   };
 }
 

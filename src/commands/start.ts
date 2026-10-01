@@ -12,9 +12,39 @@ import { initCommand } from './init.js';
 import { loginCommand } from './login.js';
 import { syncCommand } from './sync.js';
 import { cmd } from '../util/invoke.js';
+import { assertKeyValid } from '../util/auth.js';
+import { ApiError } from '../api.js';
+import { connectCommand } from './connect.js';
+import { isAllSpritesGlob } from '../util/engineConnect.js';
+import type { MagicPixelConfig } from '../config.js';
 
 interface StartOpts {
   force?: boolean;
+  folder?: string;
+}
+
+export type KeyCheck = 'ok' | 'rejected';
+
+/** Validate a key; only auth rejections map to 'rejected' — other failures throw. */
+export async function checkKey(key: string, config: MagicPixelConfig): Promise<KeyCheck> {
+  try {
+    await assertKeyValid(key, config);
+    return 'ok';
+  } catch (e) {
+    if (e instanceof ApiError && (e.status === 401 || e.status === 403)) return 'rejected';
+    throw e;
+  }
+}
+
+/** `Sprites/Enemies` → `Sprites/Enemies/**`; already-globbed input is kept. */
+export function folderToGlob(folder: string): string {
+  const f = folder.trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
+  return /[*?]/.test(f) ? f : `${f}/**`;
+}
+
+/** Only ask on an interactive engine project still set to "everything". */
+export function shouldAskFolder(connect: readonly string[], isTTY: boolean, engine: boolean): boolean {
+  return isTTY && engine && (connect.length === 0 || connect.every(isAllSpritesGlob));
 }
 
 /**
@@ -65,17 +95,56 @@ export async function startCommand(opts: StartOpts = {}): Promise<void> {
   // 3. Offer to migrate any key sitting in .env / .env.local.
   await maybeMigrateDotenvKey();
 
-  // 4. Make sure we have a usable key. Env var or stored credentials are fine.
-  const haveEnv = !!process.env.MAGICPIXEL_API_KEY;
+  // 4. Make sure we have a usable key — and that it actually works. A stale
+  //    stored key used to sail through and fail every request with 401.
+  const config = await loadConfig();
+  const envKey = process.env.MAGICPIXEL_API_KEY?.trim();
   const stored = readCredentialsSync();
-  if (!haveEnv && !stored) {
+  if (!envKey && !stored) {
     console.log();
     console.log(kleur.bold('Step: connect your account'));
     await loginCommand();
-  } else if (haveEnv) {
+  } else if (envKey) {
+    if ((await checkKey(envKey, config)) === 'rejected') {
+      console.log(kleur.red('✖ The MAGICPIXEL_API_KEY in your environment was rejected.'));
+      console.log(kleur.dim('  Fix: set it to a fresh key from https://magicpixel.art/settings (or unset it and re-run).'));
+      process.exitCode = 1;
+      return;
+    }
     console.log(kleur.dim('  Using MAGICPIXEL_API_KEY from your environment.'));
+  } else if (stored && (await checkKey(stored.apiKey, config)) === 'rejected') {
+    console.log(kleur.yellow('! Your saved key was rejected (revoked, or from another account).'));
+    if (!stdin.isTTY) {
+      console.log(kleur.dim(`  Fix: run \`${cmd('login')} --key mp_live_…\` with a fresh key from https://magicpixel.art/settings.`));
+      process.exitCode = 1;
+      return;
+    }
+    console.log(kleur.bold('Step: connect your account'));
+    await loginCommand();
   } else {
     console.log(kleur.dim('  Using stored credentials from .magicpixel/credentials.'));
+  }
+
+  // 4b. Don't push a whole game by surprise — offer one folder first.
+  let folder = opts.folder?.trim();
+  if (!folder && shouldAskFolder(config.connect, !!stdin.isTTY, isEngineKind(kind))) {
+    const rl = createInterface({ input: stdin, output: stdout });
+    try {
+      folder = (await rl.question(
+        `${kleur.cyan('?')} Sync all sprites, or one folder? ${kleur.dim('(type a folder like Sprites/Enemies, or press Enter for all)')} `,
+      )).trim();
+    } finally {
+      rl.close();
+    }
+  }
+  if (folder) {
+    console.log();
+    console.log(kleur.bold('Step: sync one folder'));
+    await connectCommand(folderToGlob(folder));
+    console.log();
+    console.log(kleur.dim(`  Add another folder later with \`${cmd('connect')} "<folder>/**"\`.`));
+    console.log(`  ${kleur.green('▶')} ${kleur.bold(`${cmd('sync')} --watch`)}   ${kleur.dim('# keeps sprites fresh while you edit them in MagicPixel')}`);
+    return;
   }
 
   // 5. First sync. syncCommand sets `process.exitCode = 1` on download

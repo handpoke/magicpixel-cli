@@ -5,6 +5,25 @@ All notable changes to `@magicpixelart/cli` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.31] - 2026-10-01
+
+### Added
+- `sync --only <folder>` (repeatable; or `"syncOnly": [...]` in magicpixel.json) limits push, pull and pruning to those game folders — e.g. `sync --watch --only Runtime/Sprites/Entities/decorations`. Everything else is left untouched. Changing the scope triggers one full pass.
+
+### Changed
+- `sync <folder>` now errors and suggests `--only` instead of silently syncing the whole project.
+- With `--only`, the legacy-folder sweep never touches folders outside the scope, and `--watch` on a folder that matches nothing exits once with a clear message instead of erroring every tick.
+
+### Fixed
+- Syncing an already-synced game folder to a new account/key/project no longer skips every sprite as "unchanged": the upload record now remembers its project and resets when the project changes (game files untouched).
+
+## [0.5.30] - 2026-10-01
+
+### Changed
+- `start` now checks the saved or environment key before syncing; a rejected saved key re-opens the key prompt instead of failing every request with 401.
+- `start` asks "all sprites, or one folder?" on game projects; `--folder <path>` answers it up front.
+- Rejected-key errors point to `login` first.
+
 ## [Unreleased]
 
 ## [0.5.29]

@@ -12,9 +12,9 @@ import ora from 'ora';
 import { mkdir, readFile, rename } from 'node:fs/promises';
 import { dirname, relative, resolve } from 'node:path';
 
-import { loadConfig, loadState, saveState, type MagicPixelConfig, type SyncState, type SyncedSprite } from '../config.js';
+import { loadConfig, loadState, saveState, resetStateIfProjectChanged, PROJECT_CHANGED_MESSAGE, type MagicPixelConfig, type SyncState, type SyncedSprite } from '../config.js';
 import { ensureEngineConnect } from '../util/engineConnect.js';
-import { PUSH_BATCH_SIZE, pushSpritesAdaptive, type PushResult, type PushSprite } from '../api.js';
+import { PUSH_BATCH_SIZE, pushSpritesAdaptive, fetchManifestPage, getLastProjectInfo, type PushResult, type PushSprite } from '../api.js';
 import { hashFile } from '../util/hash.js';
 import { createLimit } from '../util/limit.js';
 import { assetDiskPathFromKey, walkOutDirPngs } from '../util/paths.js';
@@ -77,6 +77,15 @@ export async function pushCommand(opts: PushOpts = {}): Promise<void> {
 export async function runPush(opts: PushOpts = {}): Promise<PushSummary> {
   const config = await ensureEngineConnect(await loadConfig(), process.cwd(), !opts.dryRun);
   const state = await loadState();
+  // Standalone push has no manifest yet — one tiny page tells us which project
+  // this key writes to, so a record from another account can't skip everything.
+  if (!opts.nestedSync && Object.keys(state.synced ?? {}).length > 0) {
+    const page = await fetchManifestPage({ config, limit: 1 });
+    if (resetStateIfProjectChanged(state, getLastProjectInfo()?.id, page.items.length === 0)) {
+      if (!opts.dryRun) await saveState(state);
+      if (!opts.quiet) console.log(kleur.yellow(`! ${PROJECT_CHANGED_MESSAGE}`));
+    }
+  }
   return runPushWith(config, state, opts);
 }
 
