@@ -24,7 +24,7 @@ import { maxIsoTimestamp } from '../util/iso.js';
 import { formatBytes } from '../util/format.js';
 import { computePreviousKeyOrphans } from '../util/previousKeyOrphans.js';
 import { cmd } from '../util/invoke.js';
-import { formatSlowTickLine, formatWatchSpriteLine, SLOW_TICK_HEARTBEAT_MS } from '../util/watchCopy.js';
+import { fitStatusLine, formatSlowTickLine, formatWatchSpriteLine, SLOW_TICK_HEARTBEAT_MS } from '../util/watchCopy.js';
 import { canSkipWithoutHashing, decidePull, hasNewExplicitRelease } from '../util/pullDecision.js';
 import { hasUnpushedLocalEdit } from '../util/localEdit.js';
 import { shouldReconcile } from '../util/reconcile.js';
@@ -264,7 +264,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
     inFlight = true;
     const onStatus = (msg: string) => {
       if (opts.quiet) return;
-      process.stdout.write(`\r\x1b[2K${kleur.dim(`${timestamp()} ${msg}`)}`);
+      writeStatusLine(msg);
     };
     // Heartbeat: a tick that legitimately takes minutes (huge first pull, slow
     // link) must not look like the silent hang a timeout-less fetch used to
@@ -350,7 +350,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
         );
         printChanges(r, /* indent */ '  ');
       } else {
-        process.stdout.write(`\r\x1b[2K${kleur.dim(`${timestamp()} Waiting for edits… (${r.unchanged} up to date)`)}`);
+        writeStatusLine(`Waiting for edits… (${r.unchanged} up to date)`);
       }
     } catch (e) {
       const err = e as Error;
@@ -1665,6 +1665,12 @@ function progressText(done: number, total: number, bytes: number): string {
   const filled = Math.round((pct / 100) * barWidth);
   const bar = '█'.repeat(filled) + '░'.repeat(barWidth - filled);
   return `${bar}  ${done}/${total}  ${kleur.dim(formatBytes(bytes))}`;
+}
+
+/** Rewrite the watcher's single status row, clipped so it never wraps. */
+function writeStatusLine(msg: string): void {
+  const line = fitStatusLine(`${timestamp()} ${msg}`, process.stdout.columns);
+  process.stdout.write(`\r\x1b[2K${kleur.dim(line)}`);
 }
 
 function timestamp(): string {
