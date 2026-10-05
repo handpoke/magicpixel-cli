@@ -5,6 +5,11 @@ All notable changes to `@magicpixelart/cli` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.32] - 2026-10-05
+
+### Fixed
+- `sync --watch` status lines are clipped to the terminal width, so a long sprite path no longer wraps and leaves the previous status piled on screen.
+
 ## [0.5.31] - 2026-10-01
 
 ### Added

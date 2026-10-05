@@ -48,3 +48,18 @@ export function formatSlowTickLine(elapsedSec: number, lastStatus?: string): str
     ? `${what} — still working (${elapsed})`
     : `Still working (${elapsed})`;
 }
+
+/**
+ * Fit a carriage-return status line to one terminal row. `\r\x1b[2K` only
+ * clears the row the cursor is on, so a line that wraps leaves its first rows
+ * behind and the next status prints after them (long "Looking through your
+ * game sprites… <folder>" lines piled up this way). No width (not a TTY) →
+ * unchanged.
+ */
+export function fitStatusLine(line: string, columns: number | undefined): string {
+  if (!columns || columns < 2) return line;
+  const max = columns - 1; // leave the last cell free so the cursor can't wrap
+  const chars = Array.from(line);
+  if (chars.length <= max) return line;
+  return `${chars.slice(0, max - 1).join('')}…`;
+}
