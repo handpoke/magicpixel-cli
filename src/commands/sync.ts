@@ -1459,11 +1459,13 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     // After a write, the actual downloaded bytes are the disk/cloud baseline.
     // The manifest hash may be null or represent a cached composite while the
     // download endpoint serves storage bytes for a single-artboard document.
+    const prev = nextSynced[entry.key];
+    // Never let the local game file stand in for MagicPixel's composite when
+    // the manifest has no cached hash: keep the last real cloud baseline.
     const sha = writtenKeys.has(entry.key)
       ? await fileSha256(pathFor(entry))
-      : (entry.sha256 ?? (await fileSha256(pathFor(entry))));
+      : (entry.sha256 ?? prev?.sha256 ?? (await fileSha256(pathFor(entry))));
     if (!sha) continue;
-    const prev = nextSynced[entry.key];
     const diskSha256 = writtenKeys.has(entry.key)
       ? sha
       : (shaByEntryId.get(entry.id) ?? prev?.diskSha256 ?? sha);

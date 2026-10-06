@@ -21,9 +21,9 @@ export function formatWatchSpriteLine(c: WatchSpriteCounts): string | null {
   const pulled = c.lastPulled > 0 ? c.lastPulled : 0;
   if (set === 0 && pulled === 0) return null;
   if (set > 0 && pulled > 0 && set !== pulled) {
-    return `   Sprites:  ${fmt(set)} in your game  ·  ${fmt(pulled)} last pulled from MagicPixel`;
+    return `   Sprites:  ${fmt(set)} game sprites connected  ·  ${fmt(pulled)} last pulled from MagicPixel`;
   }
-  if (set > 0) return `   Sprites:  ${fmt(set)} in your game`;
+  if (set > 0) return `   Sprites:  ${fmt(set)} game sprites connected`;
   return `   Sprites:  ${fmt(pulled)}`;
 }
 

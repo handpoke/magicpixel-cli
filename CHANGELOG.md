@@ -5,6 +5,19 @@ All notable changes to `@magicpixelart/cli` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.34] - 2026-10-06
+
+### Fixed
+- `push --force` no longer fails with "Too many sprites (max 20 per request)" when more than 20 files are retried; the retry round is now sent in small batches.
+
+## [0.5.33] - 2026-10-06
+
+### Fixed
+- Local edits to game files that were never changed in MagicPixel no longer fail as "also changed in MagicPixel". Push now sends the cloud timestamp it last saw, and sync no longer records the local file as MagicPixel's copy when the server has no cached hash.
+
+### Changed
+- Watch header now reads "N game sprites connected" — it counts game PNGs matched by `connect`, not files waiting in MagicPixel.
+
 ## [0.5.32] - 2026-10-05
 
 ### Fixed

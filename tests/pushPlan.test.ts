@@ -103,6 +103,16 @@ describe('planPush', () => {
     expect(a).toEqual({ kind: 'skip', key: 'sprites/hero/hero', reason: 'unchanged' });
   });
 
+  it('sends the last seen cloud updated_at so an untouched cloud copy is not a conflict', () => {
+    const [a] = planPush([candidate('icons/gem/gem', 'resized')], {
+      'icons/gem/gem': {
+        assetId: 'g1', layerIdx: 0, sha256: 'original', diskSha256: 'original', layers: 1,
+        cloudUpdatedAt: '2026-10-01T09:50:33.813815+00:00',
+      },
+    });
+    expect(a).toMatchObject({ kind: 'update', baseUpdatedAt: '2026-10-01T09:50:33.813815+00:00' });
+  });
+
   it('pushes when a connected original changed after a disk baseline was recorded', () => {
     const connected = {
       'sprites/hero/hero': {

@@ -280,6 +280,7 @@ export async function runPushWith(
         assetId: a.assetId,
         layerIdx: a.layerIdx,
         baseSha256: a.baseSha256,
+        ...(a.baseUpdatedAt ? { baseUpdatedAt: a.baseUpdatedAt } : {}),
         flatten: opts.flatten === true,
         ...(opts.replace ? { replace: true } : {}),
       });

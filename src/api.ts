@@ -542,6 +542,8 @@ export interface PushSprite {
   assetId?: string;
   layerIdx?: number;
   baseSha256?: string | null;
+  /** Cloud row `updated_at` last seen (see ingest `cloudUnchangedSince`). */
+  baseUpdatedAt?: string;
   flatten?: boolean;
   /** Folder resync: local wins, no cloud-changed refusal, size follows the PNG. */
   replace?: boolean;
@@ -630,6 +632,15 @@ export async function pushSpritesAdaptive(
   retryOpts?: RetryOpts,
 ): Promise<PushResult[]> {
   if (sprites.length === 0) return [];
+  // Never send more than one batch per request — callers (e.g. the --force
+  // retry round) may hand over every refused sprite at once.
+  if (sprites.length > PUSH_BATCH_SIZE) {
+    const out: PushResult[] = [];
+    for (let i = 0; i < sprites.length; i += PUSH_BATCH_SIZE) {
+      out.push(...(await pushSpritesAdaptive(sprites.slice(i, i + PUSH_BATCH_SIZE), retryOpts)));
+    }
+    return out;
+  }
   try {
     return await pushSprites(sprites, retryOpts);
   } catch (e) {

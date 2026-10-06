@@ -36,6 +36,9 @@ export type PushAction =
       assetId: string;
       layerIdx: number;
       baseSha256: string;
+      /** Cloud row `updated_at` last seen — lets the server tell an untouched
+       *  cloud copy apart from a real MagicPixel edit. */
+      baseUpdatedAt?: string;
     }
   | { kind: 'adopt'; key: string; path: string[]; pathNames: string[]; name: string };
 
@@ -203,6 +206,7 @@ export function planPush(
         // A later explicit `push` can then safely keep the local copy without
         // bypassing the server's optimistic-concurrency check.
         baseSha256: known.pendingCloudSha256 ?? known.sha256,
+        ...(known.cloudUpdatedAt && !known.pendingCloudSha256 ? { baseUpdatedAt: known.cloudUpdatedAt } : {}),
       });
       continue;
     }
