@@ -21,7 +21,7 @@ import { assetDiskPathFromKey, walkOutDirPngs } from '../util/paths.js';
 import { applyDiskFingerprints, indexSyncedBySourceRel, planPush, resolveSyncedKey, type PushCandidate } from '../util/pushPlan.js';
 import { cmd } from '../util/invoke.js';
 import { detectProjectKind, isEngineKind } from '../util/framework.js';
-import { indexGamePngs, matchConnectGlobs, GAME_INDEX_CAP_HINT, connectCapMessage, countingSpritesText, type GameIndex } from '../util/gameScan.js';
+import { indexGamePngs, matchConnectGlobs, countingSpritesText, type GameIndex } from '../util/gameScan.js';
 import { collectSourceRelMap, remapAbsToCloudKeys } from '../util/syncPath.js';
 import { assertSafeIoPath } from '../util/security.js';
 
@@ -107,8 +107,8 @@ export async function runPushWith(
       ? await indexGamePngs(kind, process.cwd(), config.outDir, {
           onProgress: spinner ? (p) => { spinner.text = countingSpritesText(p); } : undefined,
         })
-      : { files: [], capped: false });
-  const matched = matchConnectGlobs(index, config.connect ?? []);
+      : { files: [] });
+  const matched = matchConnectGlobs(index, config.connect ?? [], config.exclude);
   const sourceByKey = collectSourceRelMap(matched.entries, state.synced);
 
   const disk = await walkOutDirPngs(config.outDir);
@@ -200,13 +200,6 @@ export async function runPushWith(
     `Local sprites: ${candidates.length} · to push ${sendable.length} · unchanged ${skipped}` +
       (matched.entries.length ? ` · connected ${matched.entries.length}` : ''),
   );
-
-  if (index.capped && !quiet) {
-    console.log(kleur.yellow(`! ${GAME_INDEX_CAP_HINT}`));
-  }
-  if (matched.capped && !quiet) {
-    console.log(kleur.yellow(`! ${connectCapMessage(matched.total, matched.entries.length)}`));
-  }
 
   if (skippedUnsafe > 0 && !quiet) {
     console.log(

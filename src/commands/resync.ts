@@ -92,8 +92,7 @@ export async function runResync(segments: string[], opts: ResyncOpts = {}): Prom
   if (plan.scanned === 0) {
     throw new Error(`No local sprites found in "${label}". Nothing was changed. Check the folder name with \`magicpixel search\`.`);
   }
-  const pruneAllowed = !gameIndex.capped;
-  const preview = pruneAllowed && plan.keptAssetIds.length > 0
+  const preview = plan.keptAssetIds.length > 0
     ? await pruneResyncFolder(segments, plan.keptAssetIds, true)
     : null;
 
@@ -104,7 +103,6 @@ export async function runResync(segments: string[], opts: ResyncOpts = {}): Prom
     for (const n of preview.wouldTrash.slice(0, 10)) log(kleur.dim(`    - ${n}`));
     if (preview.wouldTrash.length > 10) log(kleur.dim(`    …and ${preview.wouldTrash.length - 10} more`));
   }
-  if (!pruneAllowed) log(kleur.yellow('  ! game scan hit its file cap — nothing will be trashed.'));
   log(kleur.dim('  Local files win: MagicPixel copies are overwritten and resized to match.'));
 
   if (opts.dryRun) {
@@ -121,8 +119,7 @@ export async function runResync(segments: string[], opts: ResyncOpts = {}): Prom
 
   let pruneSkipped: string | null = null;
   let trashed = 0;
-  if (!pruneAllowed) pruneSkipped = 'game scan capped';
-  else if (push.error > 0 || push.conflict > 0) pruneSkipped = 'some sprites failed to upload';
+  if (push.error > 0 || push.conflict > 0) pruneSkipped = 'some sprites failed to upload';
   else if (push.keptAssetIds.length === 0) pruneSkipped = 'no files confirmed';
   else {
     const res = await pruneResyncFolder(segments, push.keptAssetIds, false);

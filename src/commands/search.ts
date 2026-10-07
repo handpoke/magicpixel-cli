@@ -2,7 +2,7 @@ import kleur from 'kleur';
 import ora from 'ora';
 import { loadConfig } from '../config.js';
 import { detectProjectKind, isEngineKind } from '../util/framework.js';
-import { indexGamePngs, searchGameIndex, GAME_INDEX_CAP_HINT, countingSpritesText } from '../util/gameScan.js';
+import { indexGamePngs, searchGameIndex, countingSpritesText } from '../util/gameScan.js';
 import { cmd } from '../util/invoke.js';
 
 const PRINT_CAP = 50;
@@ -32,9 +32,6 @@ export async function searchCommand(query: string): Promise<void> {
     onProgress: (p) => { spinner.text = countingSpritesText(p); },
   });
   spinner.stop();
-  if (index.capped) {
-    console.log(kleur.yellow(`! ${GAME_INDEX_CAP_HINT}`));
-  }
   const hits = searchGameIndex(index, q);
   if (hits.length === 0) {
     console.log(kleur.dim(`  No indexed PNGs matching "${q}" (${index.files.length} scanned).`));

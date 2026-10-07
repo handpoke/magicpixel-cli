@@ -13,7 +13,7 @@ import { createLimit } from '../util/limit.js';
 import { emitTypedIndex, ensureAgentsDoc, scanDiskAssets } from '../util/emitIndex.js';
 import { assertPathInsideRoot, assertSafeIoPath } from '../util/security.js';
 import { detectProjectKind, isEngineKind } from '../util/framework.js';
-import { indexGamePngs, matchConnectGlobs, GAME_INDEX_CAP_HINT, connectCapMessage, countingSpritesText, type GameIndex, type ScanProgress } from '../util/gameScan.js';
+import { indexGamePngs, matchConnectGlobs, countingSpritesText, type GameIndex, type ScanProgress } from '../util/gameScan.js';
 import { aliasCollisionKeys, collectSourceRelMap, isPathInside, syncDiskPathFromKey } from '../util/syncPath.js';
 import { DEFAULT_UNITY_PPU, writeMissingUnityMetas } from '../util/unityMeta.js';
 import { filterUnityManifest, isWorkingSetEntry, partitionWithheldEntries, shouldPruneDeselectedEntry, workingSetPullKeys } from '../util/unityFilter.js';
@@ -591,7 +591,7 @@ async function loadWatchHeader(
     const kind = await detectProjectKind();
     if (isEngineKind(kind) && (config.connect?.length ?? 0) > 0) {
       gameIndex = await indexGamePngs(kind, process.cwd(), config.outDir, { onProgress });
-      workingSet = matchConnectGlobs(gameIndex, config.connect).total;
+      workingSet = matchConnectGlobs(gameIndex, config.connect, config.exclude).entries.length;
     } else if (state.synced) {
       workingSet = Object.keys(state.synced).length;
     }
@@ -735,13 +735,13 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
             );
           },
         })
-      : { files: [], capped: false });
+      : { files: [] });
   if (!runOpts.gameIndex) runOpts.onGameIndex?.(gameIndex);
   const fullGameIndex = gameIndex;
   const scopedGameIndex: GameIndex = scope
     ? { ...fullGameIndex, files: fullGameIndex.files.filter((f) => pathInScope(scope, f.sourceRel)) }
     : fullGameIndex;
-  const connected = matchConnectGlobs(scopedGameIndex, config.connect ?? []);
+  const connected = matchConnectGlobs(scopedGameIndex, config.connect ?? [], config.exclude);
   const sourceByKey = collectSourceRelMap(connected.entries, state.synced);
   if (scope) {
     // Out-of-scope rows become hold-only: never pulled, and their folders are
@@ -772,17 +772,10 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     }
   }
   aliasCollisionKeys(sourceByKey, manifest.map((e) => e.key));
-  if (verbose && gameIndex.capped) {
-    console.log(kleur.yellow(`! ${GAME_INDEX_CAP_HINT}`));
-  }
-  if (verbose && connected.capped) {
-    console.log(kleur.yellow(`! ${connectCapMessage(connected.total, connected.entries.length)}`));
-  }
   if (verbose && isEngineKind(projectKind)) {
     console.log(
       kleur.dim(
-        `  game index → ${gameIndex.files.length} PNG${gameIndex.files.length === 1 ? '' : 's'} · working set ${connected.entries.length}` +
-          (connected.capped ? ` of ${connected.total} matched` : ''),
+        `  game index → ${gameIndex.files.length} PNG${gameIndex.files.length === 1 ? '' : 's'} · working set ${connected.entries.length}`,
       ),
     );
   }

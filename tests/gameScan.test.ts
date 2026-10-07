@@ -132,22 +132,27 @@ describe('matchConnectGlobs', () => {
     expect(hero.entries.map((e) => e.sourceRel)).toEqual(['Assets/Sprites/Hero/idle.png']);
     const exact = matchConnectGlobs(index, ['Assets/UI/hud.png']);
     expect(exact.entries.map((e) => e.sourceRel)).toEqual(['Assets/UI/hud.png']);
-    expect(exact.total).toBe(1);
-    expect(exact.capped).toBe(false);
   });
 
-  it('reports the true match count when the ingest cap truncates', async () => {
+  it('exclude wins over connect so excluded files never upload', async () => {
+    const cwd = tmpProject();
+    mkdirSync(join(cwd, 'Assets', 'SpineRaw', 'rabbit_nft'), { recursive: true });
+    mkdirSync(join(cwd, 'Assets', 'UI'), { recursive: true });
+    writeFileSync(join(cwd, 'Assets', 'SpineRaw', 'rabbit_nft', 'body.png'), png);
+    writeFileSync(join(cwd, 'Assets', 'UI', 'hud.png'), png);
+    const index = await indexGamePngs('Unity', cwd, 'Assets/MagicPixel');
+    expect(matchConnectGlobs(index, ['**'], ['SpineRaw/rabbit_nft/**']).entries.map((e) => e.sourceRel))
+      .toEqual(['Assets/UI/hud.png']);
+  });
+
+  it('indexes every PNG with no file-count cap', async () => {
     const cwd = tmpProject();
     mkdirSync(join(cwd, 'Assets', 'Sprites'), { recursive: true });
-    writeFileSync(join(cwd, 'Assets', 'Sprites', 'a.png'), png);
-    writeFileSync(join(cwd, 'Assets', 'Sprites', 'b.png'), png);
-    writeFileSync(join(cwd, 'Assets', 'Sprites', 'c.png'), png);
+    for (let i = 0; i < 10_001; i++) writeFileSync(join(cwd, 'Assets', 'Sprites', `s${i}.png`), png);
     const index = await indexGamePngs('Unity', cwd, 'Assets/MagicPixel');
-    const r = matchConnectGlobs(index, ['Assets/Sprites/**'], 2);
-    expect(r.total).toBe(3);
-    expect(r.entries).toHaveLength(2);
-    expect(r.capped).toBe(true);
-  });
+    expect(index.files).toHaveLength(10_001);
+    expect(matchConnectGlobs(index, ['**']).entries).toHaveLength(10_001);
+  }, 60_000);
 });
 
 describe('searchGameIndex', () => {

@@ -5,6 +5,12 @@ All notable changes to `@magicpixelart/cli` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.35] - 2026-10-07
+
+### Changed
+- `exclude` now also stops uploads: game PNGs matching an exclude glob are never pushed, even when `connect` is `**`.
+- Removed the 10,000-PNG game index / connect cap: every sprite in the project is now indexed, connected and pushed. The server's daily allowance still applies; re-running resumes where it stopped.
+
 ## [0.5.34] - 2026-10-06
 
 ### Fixed

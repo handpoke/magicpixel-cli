@@ -52,21 +52,6 @@ export const GAME_SCAN_SKIP_HIDDEN = new Set([
 /** Parallel directory reads while walking the game tree. */
 const SCAN_WALK_CONCURRENCY = 8;
 
-/** Cap on the search index (whole tree). Connect uses the same ceiling. */
-export const MAX_GAME_INDEX = 10_000;
-/** Cap on PNGs ingested for one working-set connect / push. */
-export const MAX_GAME_CONNECT = MAX_GAME_INDEX;
-
-export const GAME_INDEX_CAP_HINT =
-  `Game index hit ${MAX_GAME_INDEX} PNGs — later files aren't searchable or connectable.`;
-
-export function connectCapMessage(total: number, ingested: number): string {
-  return (
-    `${total} sprites match — syncing the first ${ingested} (cap ${MAX_GAME_CONNECT}). ` +
-    `Connect a smaller folder if you don't need all of them.`
-  );
-}
-
 /** True for a full Unity game project (not an embedded UPM package). */
 function isUnityGameProject(cwd: string, assetRoot: string | null): boolean {
   return Boolean(assetRoot && existsSync(resolve(cwd, 'ProjectSettings')));
@@ -105,7 +90,6 @@ export interface GameIndexEntry {
 
 export interface GameIndex {
   files: GameIndexEntry[];
-  capped: boolean;
 }
 
 function importRel(abs: string, cwd: string, assetRoot: string | null): string {
@@ -222,7 +206,7 @@ export async function indexGamePngs(
   outDir: string = '',
   opts: IndexGamePngsOpts = {},
 ): Promise<GameIndex> {
-  const empty: GameIndex = { files: [], capped: false };
+  const empty: GameIndex = { files: [] };
   if (!isEngineKind(kind)) return empty;
   const scanRoot = resolve(cwd);
   if (!existsSync(scanRoot)) return empty;
@@ -238,42 +222,38 @@ export async function indexGamePngs(
   // Library/Packages/cloud placeholders and looks hung at "1 folder".
   const startAt = isUnityGameProject(cwd, assetRoot) ? assetRoot! : scanRoot;
   const preferFirst = startAt === scanRoot ? assetRoot : null;
-  await walkPngs(startAt, scanRoot, destNorm, found, MAX_GAME_INDEX + 1, io, report, stats, preferFirst);
+  await walkPngs(startAt, scanRoot, destNorm, found, Infinity, io, report, stats, preferFirst);
   report.flush?.();
   opts.onProgress?.({ pngs: found.length, folders: stats.folders });
   found.sort((a, b) => a.localeCompare(b));
-  const capped = found.length > MAX_GAME_INDEX;
-  if (capped) found.length = MAX_GAME_INDEX;
 
   const files: GameIndexEntry[] = [];
   for (const abs of found) {
     const entry = toEntry(abs, scanRoot, assetRoot);
     if (entry) files.push(entry);
   }
-  return { files, capped };
+  return { files };
 }
 
 export interface ConnectMatchResult {
   entries: GameIndexEntry[];
-  /** Matches before the ingest cap. */
-  total: number;
-  capped: boolean;
 }
 
-/** Filter the index by connect globs (cwd-relative or asset-root-relative). */
+/** Filter the index by connect globs minus exclude globs (cwd-, asset-root-relative or manifest key). */
 export function matchConnectGlobs(
   index: GameIndex,
   globs: readonly string[],
-  max: number = MAX_GAME_CONNECT,
+  exclude: readonly string[] = [],
 ): ConnectMatchResult {
-  if (globs.length === 0) return { entries: [], total: 0, capped: false };
+  if (globs.length === 0) return { entries: [] };
+  const hit = (e: GameIndexEntry, g: string) =>
+    matchGlob(e.sourceRel, g) || matchGlob(e.adoptRel, g) || matchGlob(e.key, g);
+  // `exclude` wins over `connect`: excluded game files are never uploaded.
   const matched = index.files.filter((e) =>
-    globs.some((g) => matchGlob(e.sourceRel, g) || matchGlob(e.adoptRel, g)),
+    globs.some((g) => hit(e, g)) && !exclude.some((g) => hit(e, g)),
   );
   matched.sort((a, b) => a.sourceRel.localeCompare(b.sourceRel));
-  const total = matched.length;
-  const capped = total > max;
-  return { entries: capped ? matched.slice(0, max) : matched, total, capped };
+  return { entries: matched };
 }
 
 export function searchGameIndex(index: GameIndex, query: string): GameIndexEntry[] {

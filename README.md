@@ -150,13 +150,23 @@ npx @magicpixelart/cli sync --watch --only Runtime/Sprites/Entities/decorations
 
 Only that folder is pushed, pulled, or pruned. Every other file stays exactly as it is. Repeat `--only` for more folders, or set `"syncOnly"` in `magicpixel.json`. Changing the folder list triggers one full check. `sync <folder>` without `--only` stops with an error instead of syncing everything.
 
+## Keep a folder out of MagicPixel
+
+To leave game files on disk but out of your library, add them to `exclude` in `magicpixel.json`:
+
+```json
+{ "exclude": [".SpineRaw/rabbit_nft/**"] }
+```
+
+Excluded files are never uploaded, even when `connect` is `**`, and the CLI never deletes them from your game. Then delete the folder in the MagicPixel library (it goes to Trash) and it stays gone.
+
 ## Config (`magicpixel.json`)
 
 | Field      | Type       | Default                 | Meaning                                          |
 | ---------- | ---------- | ----------------------- | ------------------------------------------------ |
 | `outDir`   | `string`   | framework-dependent     | Where PNGs (and `index.ts`) are written.         |
 | `include`  | `string[]` | `["**/*"]`              | Globs (picomatch) matched against `folder/slug`. |
-| `exclude`  | `string[]` | `[]`                    | Globs to exclude.                                |
+| `exclude`  | `string[]` | `[]`                    | Globs to skip in both directions: never downloaded, and game PNGs matching them are never uploaded (wins over `connect`). |
 | `connect`  | `string[]` | `["**"]` on engines | Game PNG globs to keep in Connected. Empty on JS projects. |
 | `emitIndex`| `boolean`  | `true`                  | Emit `<outDir>/index.ts` with typed asset map.   |
 | `unityPpu` | `number?`  | `32`                    | Unity only: pixels-per-unit in generated `.meta`. |
