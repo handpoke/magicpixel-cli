@@ -46,6 +46,8 @@ export interface PushOpts {
   excludeKeys?: ReadonlySet<string>;
   /** "My local copy wins": re-send refused sprites with the live cloud sha. */
   force?: boolean;
+  /** With `force`: also replace files last saved in the MagicPixel editor. */
+  overwriteEditorChanges?: boolean;
   /** Folder resync: every matching local file overwrites its MagicPixel copy. */
   replace?: boolean;
   /** Only consider these keys (folder resync scope). */
@@ -317,7 +319,7 @@ export async function runPushWith(
     // without a live sha, and the retry as an update is what makes the server
     // composite the artboard and report one.
     for (let round = 0; round < 2; round++) {
-      const retry = forcedRetrySprites(results, spriteByKey, opts.flatten === true);
+      const retry = forcedRetrySprites(results, spriteByKey, opts.flatten === true, opts.overwriteEditorChanges === true);
       if (retry.length === 0) break;
       const retryResults = await pushSpritesAdaptive(retry);
       synced = await commitPushResults({
@@ -360,7 +362,7 @@ export async function runPushWith(
     let printedIssues = 0;
     for (const r of results) {
       if (r.status === 'conflict') {
-        if (printedIssues++ < 10) console.log(`  ${kleur.yellow('!')} ${r.key}: ${conflictHint(r.reason)}`);
+        if (printedIssues++ < 10) console.log(`  ${kleur.yellow('!')} ${r.key}: ${opts.force && r.lastWriteSource === 'editor' && !opts.overwriteEditorChanges ? `edited in MagicPixel — skipped. Add --overwrite-editor-changes to replace it.` : conflictHint(r.reason)}`);
       } else if (r.status === 'error') {
         if (printedIssues++ < 10) console.log(`  ${kleur.red('!')} ${r.key}: ${r.message ?? 'push failed'}`);
       }
@@ -412,10 +414,13 @@ export function forcedRetrySprites(
   results: readonly PushResult[],
   spriteByKey: ReadonlyMap<string, PushSprite>,
   flatten: boolean,
+  overwriteEditorChanges = false,
 ): PushSprite[] {
   const out: PushSprite[] = [];
   for (const r of results) {
     if (r.status !== 'conflict' || r.reason !== 'cloud-changed' || !r.assetId) continue;
+    // A newer save made in the MagicPixel editor is never silently undone.
+    if (r.lastWriteSource === 'editor' && !overwriteEditorChanges) continue;
     const original = spriteByKey.get(r.key);
     if (!original) continue;
     // Skip a round we already tried with this exact baseline.

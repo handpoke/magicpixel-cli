@@ -150,6 +150,10 @@ npx @magicpixelart/cli sync --watch --only Runtime/Sprites/Entities/decorations
 
 Only that folder is pushed, pulled, or pruned. Every other file stays exactly as it is. Repeat `--only` for more folders, or set `"syncOnly"` in `magicpixel.json`. Changing the folder list triggers one full check. `sync <folder>` without `--only` stops with an error instead of syncing everything.
 
+## Forced pushes and editor edits
+
+`push --force` keeps your local copy when a sprite changed on both sides, except for files last saved in the MagicPixel editor: those are skipped and listed, so a forced push never silently undoes editor work. Add `--overwrite-editor-changes` to replace them as well.
+
 ## Keep a folder out of MagicPixel
 
 To leave game files on disk but out of your library, add them to `exclude` in `magicpixel.json`:

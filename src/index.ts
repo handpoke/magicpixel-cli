@@ -124,7 +124,8 @@ program
   .description('Upload local sprite edits back to MagicPixel (two-way sync)')
   .option('--dry-run', 'Print what would be pushed without sending anything')
   .option('--flatten', 'Allow replacing multi-layer artboards with the flat local image')
-  .option('--force', 'Keep your local copy when a sprite also changed in MagicPixel')
+  .option('--force', 'Keep your local copy when a sprite also changed in MagicPixel (skips files saved in the MagicPixel editor)')
+  .option('--overwrite-editor-changes', 'With --force: also replace files saved in the MagicPixel editor')
   .addHelpText('after', '\nExamples:\n  $ magicpixel push --dry-run      # see what changed on disk\n  $ magicpixel push                # send local edits + new sprites\n  $ magicpixel push --force        # your local copy wins on both-sides-changed\n')
   .action(wrap("push", async (opts) => pushCommand(opts as Parameters<typeof pushCommand>[0])));
 

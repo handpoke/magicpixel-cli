@@ -5,6 +5,11 @@ All notable changes to `@magicpixelart/cli` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.36] - 2026-10-07
+
+### Changed
+- `push --force` no longer replaces files whose newer copy was saved in the MagicPixel editor; they are listed as "edited in MagicPixel — skipped". Add `--overwrite-editor-changes` to replace them too.
+
 ## [0.5.35] - 2026-10-07
 
 ### Changed

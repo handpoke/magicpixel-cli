@@ -564,6 +564,8 @@ export interface PushResult {
   layerIdx?: number;
   /** Composite sha the cloud now reports — store it as the next baseline. */
   sha256?: string;
+  /** `cloud-changed` only: 'editor' when the newer cloud copy is a MagicPixel save. */
+  lastWriteSource?: string;
   /** Adopt only: the key the manifest will use. Differs from the disk key when
    *  the server's slug/collision handling renamed the document. */
   cloudKey?: string;

@@ -99,3 +99,20 @@ describe('rememberRefusedCloudShas', () => {
     expect(rememberRefusedCloudShas(known(), [conflict({ sha256: undefined })])).toBe(false);
   });
 });
+
+describe('forcedRetrySprites — editor saves', () => {
+  const byKey = new Map([['props/rock', sprite()]]);
+
+  it('skips a file whose newer cloud copy was saved in the MagicPixel editor', () => {
+    expect(forcedRetrySprites([conflict({ lastWriteSource: 'editor' })], byKey, false)).toEqual([]);
+  });
+
+  it('replaces it with --overwrite-editor-changes', () => {
+    expect(forcedRetrySprites([conflict({ lastWriteSource: 'editor' })], byKey, false, true)).toHaveLength(1);
+  });
+
+  it('still forces game-written and unknown-source files', () => {
+    expect(forcedRetrySprites([conflict({ lastWriteSource: 'game' })], byKey, false)).toHaveLength(1);
+    expect(forcedRetrySprites([conflict()], byKey, false)).toHaveLength(1);
+  });
+});
