@@ -5,6 +5,17 @@ All notable changes to `@magicpixelart/cli` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.38] - 2026-10-10
+
+### Fixed
+- Full Unity projects also scan sprite dot-folders at the project root (e.g. `.SpineRaw`), not only `Assets/`. VCS/editor folders stay skipped.
+- `sync` and `connect` report how many PNGs an `exclude` rule skipped, naming the rule.
+
+## [0.5.37] - 2026-10-09
+
+### Fixed
+- `sync` stops before writing when the sprites it would download are connected to another game folder on this machine (e.g. run from the wrong repo), naming the right folder. `--here` overrides; README documents it.
+
 ## [0.5.36] - 2026-10-07
 
 ### Changed
@@ -26,13 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Local edits to game files that were never changed in MagicPixel no longer fail as "also changed in MagicPixel". Push now sends the cloud timestamp it last saw, and sync no longer records the local file as MagicPixel's copy when the server has no cached hash.
 
-### Changed
-- Watch header now reads "N game sprites connected" — it counts game PNGs matched by `connect`, not files waiting in MagicPixel.
-
 ## [0.5.32] - 2026-10-05
 
-### Fixed
-- `sync --watch` status lines are clipped to the terminal width, so a long sprite path no longer wraps and leaves the previous status piled on screen.
+### Changed
+- Watch header now reads "N game sprites connected" — it counts game PNGs matched by `connect`, not files waiting in MagicPixel.
 
 ## [0.5.31] - 2026-10-01
 

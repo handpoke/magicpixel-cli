@@ -215,3 +215,39 @@ describe('GAME_SCAN_SKIP_HIDDEN', () => {
     expect(GAME_SCAN_SKIP_HIDDEN.has('.SpineRaw_nonremote')).toBe(false);
   });
 });
+
+import { mkdirSync as mk2, mkdtempSync as mkt2, writeFileSync as wf2 } from 'node:fs';
+import { tmpdir as td2 } from 'node:os';
+import { join as j2 } from 'node:path';
+import { describeExcluded as dx2, indexGamePngs as idx2, matchConnectGlobs as mc2 } from '../src/util/gameScan.js';
+
+describe('Unity root sprite dot-folders + exclude report', () => {
+  const png = Buffer.from('89504e470d0a1a0a', 'hex');
+  function unityProject(): string {
+    const d = mkt2(j2(td2(), 'mp-unity-'));
+    for (const p of ['Assets/Sprites/a.png', '.SpineRaw/rabbit_nft/poseidon/body_front.png', 'Library/x.png', '.git/y.png']) {
+      const abs = j2(d, p);
+      mk2(j2(abs, '..'), { recursive: true });
+      wf2(abs, png);
+    }
+    mk2(j2(d, 'ProjectSettings'), { recursive: true });
+    return d;
+  }
+
+  it('indexes .SpineRaw next to Assets but still skips Library and .git', async () => {
+    const idx = await idx2('Unity', unityProject());
+    const rels = idx.files.map((f) => f.sourceRel).sort();
+    expect(rels).toContain('.SpineRaw/rabbit_nft/poseidon/body_front.png');
+    expect(rels).toContain('Assets/Sprites/a.png');
+    expect(rels.some((r) => r.startsWith('Library/') || r.startsWith('.git/'))).toBe(false);
+  });
+
+  it('counts and names the exclude rule that skipped files', async () => {
+    const idx = await idx2('Unity', unityProject());
+    const r = mc2(idx, ['**'], ['.SpineRaw/rabbit_nft/**']);
+    expect(r.excluded).toBe(1);
+    expect(r.topExclude).toBe('.SpineRaw/rabbit_nft/**');
+    expect(dx2(r)).toContain('1 PNG skipped by exclude rules (.SpineRaw/rabbit_nft/**)');
+    expect(dx2(mc2(idx, ['**'], []))).toBeNull();
+  });
+});

@@ -3,7 +3,7 @@ import ora from 'ora';
 import { loadConfig, saveConfig } from '../config.js';
 import { assertSafeGlob } from '../util/security.js';
 import { detectProjectKind, isEngineKind } from '../util/framework.js';
-import { indexGamePngs, matchConnectGlobs, countingSpritesText } from '../util/gameScan.js';
+import { describeExcluded, indexGamePngs, matchConnectGlobs, countingSpritesText } from '../util/gameScan.js';
 import { isAllSpritesGlob, nextConnectGlobs } from '../util/engineConnect.js';
 import { cmd } from '../util/invoke.js';
 import { runPush } from './push.js';
@@ -42,6 +42,8 @@ export async function connectCommand(glob: string): Promise<void> {
   });
   spinner.stop();
   const matched = matchConnectGlobs(index, config.connect, config.exclude);
+  const skipped = describeExcluded(matched);
+  if (skipped) console.log(kleur.dim(`  ${skipped}`));
   if (matched.entries.length === 0) {
     console.log(kleur.yellow(`  No PNGs matched. Try \`${cmd('search')} <name>\` to see indexed paths.`));
     return;

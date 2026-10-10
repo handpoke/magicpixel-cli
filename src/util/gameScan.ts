@@ -4,7 +4,7 @@
  * globs select a working set; sync writes back to those original paths.
  */
 import { existsSync } from 'node:fs';
-import { opendir } from 'node:fs/promises';
+import { opendir, readdir } from 'node:fs/promises';
 import { relative, resolve } from 'node:path';
 import type { ProjectKind } from './framework.js';
 import { isEngineKind, resolveChildDir } from './framework.js';
@@ -223,6 +223,13 @@ export async function indexGamePngs(
   const startAt = isUnityGameProject(cwd, assetRoot) ? assetRoot! : scanRoot;
   const preferFirst = startAt === scanRoot ? assetRoot : null;
   await walkPngs(startAt, scanRoot, destNorm, found, Infinity, io, report, stats, preferFirst);
+  // Full Unity games also keep sprite sources in root dot-folders next to
+  // Assets/ (e.g. `.SpineRaw`). Walk those too; Unity's own folders stay out.
+  if (startAt !== scanRoot) {
+    for (const dir of await rootSpriteDotDirs(scanRoot)) {
+      await walkPngs(dir, scanRoot, destNorm, found, Infinity, io, report, stats, null);
+    }
+  }
   report.flush?.();
   opts.onProgress?.({ pngs: found.length, folders: stats.folders });
   found.sort((a, b) => a.localeCompare(b));
@@ -235,8 +242,31 @@ export async function indexGamePngs(
   return { files };
 }
 
+/** One-line summary of exclude-dropped files, or null when none. */
+export function describeExcluded(r: ConnectMatchResult): string | null {
+  if (!r.excluded) return null;
+  return `${r.excluded.toLocaleString('en-US')} PNG${r.excluded === 1 ? '' : 's'} skipped by exclude rules (${r.topExclude}) — edit "exclude" in magicpixel.json to include them`;
+}
+
+/** Root-level dot-folders that may hold sprites (not VCS/editor/tool dirs). */
+export async function rootSpriteDotDirs(root: string): Promise<string[]> {
+  try {
+    const ents = await readdir(root, { withFileTypes: true });
+    return ents
+      .filter((e) => e.isDirectory() && !e.isSymbolicLink() && e.name.startsWith('.') && !shouldSkipDir(e.name))
+      .map((e) => resolve(root, e.name))
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
 export interface ConnectMatchResult {
   entries: GameIndexEntry[];
+  /** Files that matched `connect` but were dropped by an `exclude` rule. */
+  excluded?: number;
+  /** The exclude rule that dropped the most files. */
+  topExclude?: string;
 }
 
 /** Filter the index by connect globs minus exclude globs (cwd-, asset-root-relative or manifest key). */
@@ -249,11 +279,18 @@ export function matchConnectGlobs(
   const hit = (e: GameIndexEntry, g: string) =>
     matchGlob(e.sourceRel, g) || matchGlob(e.adoptRel, g) || matchGlob(e.key, g);
   // `exclude` wins over `connect`: excluded game files are never uploaded.
-  const matched = index.files.filter((e) =>
-    globs.some((g) => hit(e, g)) && !exclude.some((g) => hit(e, g)),
-  );
+  const matched: GameIndexEntry[] = [];
+  const byRule = new Map<string, number>();
+  let excluded = 0;
+  for (const e of index.files) {
+    if (!globs.some((g) => hit(e, g))) continue;
+    const rule = exclude.find((g) => hit(e, g));
+    if (rule === undefined) matched.push(e);
+    else { excluded++; byRule.set(rule, (byRule.get(rule) ?? 0) + 1); }
+  }
   matched.sort((a, b) => a.sourceRel.localeCompare(b.sourceRel));
-  return { entries: matched };
+  const topExclude = [...byRule.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+  return { entries: matched, ...(excluded ? { excluded, topExclude } : {}) };
 }
 
 export function searchGameIndex(index: GameIndex, query: string): GameIndexEntry[] {

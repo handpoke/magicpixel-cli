@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fitStatusLine, formatSlowTickLine, formatWatchSpriteLine, SLOW_TICK_HEARTBEAT_MS } from '../src/util/watchCopy.js';
+import { formatSlowTickLine, formatWatchSpriteLine, SLOW_TICK_HEARTBEAT_MS } from '../src/util/watchCopy.js';
 
 describe('formatWatchSpriteLine', () => {
   it('returns null when both counts are empty', () => {
@@ -56,26 +56,5 @@ describe('formatSlowTickLine', () => {
 
   it('heartbeat fires no sooner than a minute', () => {
     expect(SLOW_TICK_HEARTBEAT_MS).toBeGreaterThanOrEqual(60_000);
-  });
-});
-
-describe('fitStatusLine', () => {
-  const line = '[12:25:14] Looking through your game sprites…  3,114 sprites · 414 folders  ·  Runtime/Sprites';
-
-  it('clips a long status to one row so the next status overwrites it', () => {
-    const out = fitStatusLine(line, 60);
-    expect(Array.from(out)).toHaveLength(59);
-    expect(out.endsWith('…')).toBe(true);
-    expect(out.startsWith('[12:25:14] Looking through')).toBe(true);
-  });
-
-  it('leaves a short status alone', () => {
-    expect(fitStatusLine('[12:25:14] Waiting for edits… (228 up to date)', 80)).toBe(
-      '[12:25:14] Waiting for edits… (228 up to date)',
-    );
-  });
-
-  it('leaves the line alone when there is no terminal width', () => {
-    expect(fitStatusLine(line, undefined)).toBe(line);
   });
 });

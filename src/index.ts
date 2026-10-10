@@ -107,6 +107,7 @@ program
   .option('-q, --quiet', 'Minimal output (for CI)')
   .option('-c, --concurrency <n>', 'Parallel downloads (1–16, default 6)', parseConcurrency)
   .option('--only <folder...>', 'Only sync these game folders (repeatable), e.g. Runtime/Sprites/Entities/decorations')
+  .option('--here', 'Download here even if these sprites are connected to another game folder')
   .argument('[extra...]')
   .addHelpText('after', '\nExamples:\n  $ magicpixel sync --watch --only Runtime/Sprites/Enemies   # one folder\n  $ magicpixel sync                # incremental sync\n  $ magicpixel sync --full         # ignore lastSync, re-check everything\n  $ magicpixel sync -w             # watch mode (2s; adaptive idle backoff; exit 2 after 5 auth failures)\n')
   .action(wrap("sync", async (extra: string[], opts) => {

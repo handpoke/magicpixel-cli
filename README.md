@@ -131,6 +131,7 @@ No bundler config, no runtime, no extra package.
 | `-c, --concurrency <n>` | Parallel downloads (1–16, default 6). |
 | `-q, --quiet` | Minimal output (for CI). |
 | `--only <folder...>` | Only push, pull and prune inside these game folders (repeatable). Everything else is left untouched. |
+| `--here` | Download even if these sprites are connected to another game folder on this computer (sync otherwise stops and names that folder). Run sync from your game project folder. |
 
 Each successful sync prints a per-file change list (`+` added, `~` modified, `↪` renamed, `-` pruned) so you (and any AI agent reading the logs) know exactly what to wire up.
 
@@ -161,6 +162,8 @@ To leave game files on disk but out of your library, add them to `exclude` in `m
 ```json
 { "exclude": [".SpineRaw/rabbit_nft/**"] }
 ```
+
+Sync prints how many PNGs your `exclude` rules skipped, so a forgotten rule is easy to spot. In full Unity projects sync scans `Assets/` plus sprite dot-folders at the project root (like `.SpineRaw`).
 
 Excluded files are never uploaded, even when `connect` is `**`, and the CLI never deletes them from your game. Then delete the folder in the MagicPixel library (it goes to Trash) and it stays gone.
 

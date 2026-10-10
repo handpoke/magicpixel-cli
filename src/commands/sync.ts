@@ -13,7 +13,7 @@ import { createLimit } from '../util/limit.js';
 import { emitTypedIndex, ensureAgentsDoc, scanDiskAssets } from '../util/emitIndex.js';
 import { assertPathInsideRoot, assertSafeIoPath } from '../util/security.js';
 import { detectProjectKind, isEngineKind } from '../util/framework.js';
-import { indexGamePngs, matchConnectGlobs, countingSpritesText, type GameIndex, type ScanProgress } from '../util/gameScan.js';
+import { describeExcluded, indexGamePngs, matchConnectGlobs, countingSpritesText, type GameIndex, type ScanProgress } from '../util/gameScan.js';
 import { aliasCollisionKeys, collectSourceRelMap, isPathInside, syncDiskPathFromKey } from '../util/syncPath.js';
 import { DEFAULT_UNITY_PPU, writeMissingUnityMetas } from '../util/unityMeta.js';
 import { filterUnityManifest, isWorkingSetEntry, partitionWithheldEntries, shouldPruneDeselectedEntry, workingSetPullKeys } from '../util/unityFilter.js';
@@ -24,7 +24,7 @@ import { maxIsoTimestamp } from '../util/iso.js';
 import { formatBytes } from '../util/format.js';
 import { computePreviousKeyOrphans } from '../util/previousKeyOrphans.js';
 import { cmd } from '../util/invoke.js';
-import { fitStatusLine, formatSlowTickLine, formatWatchSpriteLine, SLOW_TICK_HEARTBEAT_MS } from '../util/watchCopy.js';
+import { formatSlowTickLine, formatWatchSpriteLine, SLOW_TICK_HEARTBEAT_MS } from '../util/watchCopy.js';
 import { canSkipWithoutHashing, decidePull, hasNewExplicitRelease } from '../util/pullDecision.js';
 import { hasUnpushedLocalEdit } from '../util/localEdit.js';
 import { shouldReconcile } from '../util/reconcile.js';
@@ -32,6 +32,7 @@ import { runPush, type PushSummary } from './push.js';
 import { claimResyncRequest, reportResyncRequest } from '../api.js';
 import { runResync } from './resync.js';
 import { keyInScope, pathInScope, resolveSyncScope, scopeFingerprint } from '../util/syncScope.js';
+import { findForeignOwner, foreignOwnerMessage, recordProjectRoot } from '../util/projectRoots.js';
 
 /** How often the watcher asks for a library "Resync from game" request. */
 const RESYNC_POLL_MS = 15_000;
@@ -77,6 +78,8 @@ interface SyncOpts {
   quiet?: boolean;
   /** `--only <folder>`: limit push/pull/prune to these game folders. */
   only?: string[];
+  /** `--here`: download even when another folder owns these connected sprites. */
+  here?: boolean;
 }
 
 interface RenameInfo {
@@ -264,7 +267,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
     inFlight = true;
     const onStatus = (msg: string) => {
       if (opts.quiet) return;
-      writeStatusLine(msg);
+      process.stdout.write(`\r\x1b[2K${kleur.dim(`${timestamp()} ${msg}`)}`);
     };
     // Heartbeat: a tick that legitimately takes minutes (huge first pull, slow
     // link) must not look like the silent hang a timeout-less fetch used to
@@ -350,7 +353,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
         );
         printChanges(r, /* indent */ '  ');
       } else {
-        writeStatusLine(`Waiting for edits… (${r.unchanged} up to date)`);
+        process.stdout.write(`\r\x1b[2K${kleur.dim(`${timestamp()} Waiting for edits… (${r.unchanged} up to date)`)}`);
       }
     } catch (e) {
       const err = e as Error;
@@ -778,6 +781,8 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
         `  game index → ${gameIndex.files.length} PNG${gameIndex.files.length === 1 ? '' : 's'} · working set ${connected.entries.length}`,
       ),
     );
+    const skipped = describeExcluded(connected);
+    if (skipped) console.log(kleur.dim(`  ${skipped}`));
   }
   const pathForKey = (key: string): string =>
     syncDiskPathFromKey(config.outDir, key, sourceByKey);
@@ -973,6 +978,25 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   const remoteDiskPaths = new Set(manifest.map((e) => pathFor(e)));
   const remoteKeySet = new Set(manifest.map((e) => e.key));
   const previousKeySet = new Set(Object.values(previousAssets));
+
+  // Wrong-folder guard: sprites connected to another game folder on this
+  // machine would land here as stray copies under outDir. Stop before writing.
+  const projectIdForRoots = getLastProjectInfo()?.id;
+  if (projectIdForRoots && !opts.here) {
+    const owner = await findForeignOwner(
+      projectIdForRoots,
+      process.cwd(),
+      toDownload.filter((e) => !sourceByKey.has(e.key)).map((e) => e.key),
+    );
+    if (owner) {
+      const msg = foreignOwnerMessage(owner, process.cwd(), `add ${kleur.cyan('--here')}`);
+      if (runOpts.watchMode) {
+        console.error(kleur.red(msg));
+        process.exit(1);
+      }
+      throw new Error(msg);
+    }
+  }
 
   const localPngs = needsLocalPngWalk(since, toDownload.length)
     ? await walkOutDirPngs(config.outDir)
@@ -1563,6 +1587,11 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   }
 
   await saveState(nextState);
+  // This folder owns real game paths → remember it so a sync elsewhere can
+  // point back here instead of writing stray copies.
+  if (projectIdForRoots && sourceByKey.size > 0) {
+    await recordProjectRoot(projectIdForRoots, process.cwd());
+  }
 
   if (result.failed > 0 && verbose) {
     console.log(kleur.yellow(`\n${result.failed} download${result.failed === 1 ? '' : 's'} failed — lastSync not advanced. Re-run to retry.`));
@@ -1660,12 +1689,6 @@ function progressText(done: number, total: number, bytes: number): string {
   const filled = Math.round((pct / 100) * barWidth);
   const bar = '█'.repeat(filled) + '░'.repeat(barWidth - filled);
   return `${bar}  ${done}/${total}  ${kleur.dim(formatBytes(bytes))}`;
-}
-
-/** Rewrite the watcher's single status row, clipped so it never wraps. */
-function writeStatusLine(msg: string): void {
-  const line = fitStatusLine(`${timestamp()} ${msg}`, process.stdout.columns);
-  process.stdout.write(`\r\x1b[2K${kleur.dim(line)}`);
 }
 
 function timestamp(): string {
