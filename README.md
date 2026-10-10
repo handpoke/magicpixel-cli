@@ -119,6 +119,8 @@ No bundler config, no runtime, no extra package.
 | `list` | Print matching manifest as a table. |
 | `status` | Config, last sync, diff vs remote. |
 | `whoami` | Verify API key, report visible assets. |
+| `why <path>` | Explain what the next sync does with each game PNG under a path (watched? excluded by which rule? new, changed, unchanged?). No network. |
+| `clean-strays [--dry-run] [-y]` | Delete copies sync wrote into `outDir` for sprites that belong to another game folder (plus their `.meta`). Never touches your own game files. |
 
 ### `sync` flags
 
@@ -131,7 +133,7 @@ No bundler config, no runtime, no extra package.
 | `-c, --concurrency <n>` | Parallel downloads (1–16, default 6). |
 | `-q, --quiet` | Minimal output (for CI). |
 | `--only <folder...>` | Only push, pull and prune inside these game folders (repeatable). Everything else is left untouched. |
-| `--here` | Download even if these sprites are connected to another game folder on this computer (sync otherwise stops and names that folder). Run sync from your game project folder. |
+| `--here` | Download copies even if these sprites belong to another game folder. Without it, sprites from Connected folders are only written to their real game file, or beside sibling files this folder owns — never as copies under `outDir`. |
 
 Each successful sync prints a per-file change list (`+` added, `~` modified, `↪` renamed, `-` pruned) so you (and any AI agent reading the logs) know exactly what to wire up.
 
@@ -166,6 +168,25 @@ To leave game files on disk but out of your library, add them to `exclude` in `m
 Sync prints how many PNGs your `exclude` rules skipped, so a forgotten rule is easy to spot. In full Unity projects sync scans `Assets/` plus sprite dot-folders at the project root (like `.SpineRaw`).
 
 Excluded files are never uploaded, even when `connect` is `**`, and the CLI never deletes them from your game. Then delete the folder in the MagicPixel library (it goes to Trash) and it stays gone.
+
+## Monorepos (several Unity projects)
+
+Keep **one** MagicPixel setup at the root of a repo that holds several game folders (e.g. `kr-core/`, `kr-remote-bundles/`):
+
+```sh
+cd my-monorepo
+npx @magicpixelart/cli@latest start      # or: magicpixel consolidate
+```
+
+- Every game folder is scanned, including hidden folders such as `.SpineRaw` (never `.git`, `Library`, `Temp`).
+- Sprite names stay the same as when each folder synced on its own — nothing re-uploads.
+- Old per-folder setups are merged, backed up to `.magicpixel/backup/`, and removed; stray copies of game files are deleted.
+- Run any command from a game folder and it uses the root setup. Folder names you type are read from where you are: `sync --only Runtime` inside `kr-core` means `kr-core/Runtime`.
+- Add a folder later with `magicpixel connect "kr-puzzle/**"`.
+
+## Plain output
+
+Add `--plain` to any command (or set `NO_COLOR=1` or `MAGICPIXEL_PLAIN=1`) for output without colors, emoji or boxes. Piped output and CI logs are plain automatically.
 
 ## Config (`magicpixel.json`)
 
@@ -230,6 +251,8 @@ Every error message includes a `Fix:` block. Common ones:
 | `401` / `403` | Regenerate the key at magicpixel.art/settings. |
 | `whoami` shows 0 assets | The key is bound to an empty project. Mint a key for the project that has art. |
 | `index.ts` doesn't update | Run `sync --full` once; renames may take a full pass to propagate. |
+| A file in your game isn't uploading | Run `magicpixel why <folder>` — it names the exclude rule, multi-layer artboard, or other reason. |
+| Sprites from another game appeared under `outDir` | Run `magicpixel clean-strays` to remove them, then sync from the game folder that owns them. |
 | Files keep re-downloading | Your build system is rewriting PNGs. Sync into a dir your bundler reads but doesn't mutate. |
 
 ## Telemetry

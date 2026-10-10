@@ -1,4 +1,5 @@
 import kleur from 'kleur';
+import { ui } from '../util/ui.js';
 import { existsSync } from 'node:fs';
 import { readFile, appendFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -104,21 +105,21 @@ export async function initCommand(opts: InitOpts): Promise<void> {
 
   await saveConfig(config);
   console.log();
-  console.log(kleur.green('✓ wrote magicpixel.json'));
+  console.log(ui.ok('wrote magicpixel.json'));
   if (kind === 'GameMaker') {
     console.log(kleur.dim("  Note: GameMaker doesn't auto-import — refresh Included Files after each sync."));
   }
 
   if (addGitignore) {
     const added = await ensureGitignore();
-    if (added) console.log(kleur.green('✓ added .magicpixel/ to .gitignore'));
+    if (added) console.log(ui.ok('added .magicpixel/ to .gitignore'));
   }
 
   let watchScriptAdded = false;
   if (addWatchScript && pkgExists) {
     const r = await ensureWatchScript(pkgPath);
     watchScriptAdded = r.added;
-    if (r.added) console.log(kleur.green(`✓ added "${WATCH_SCRIPT_NAME}" script to package.json`));
+    if (r.added) console.log(ui.ok(`added "${WATCH_SCRIPT_NAME}" script to package.json`));
     else if (r.alreadyPresent) console.log(kleur.dim(`  "${WATCH_SCRIPT_NAME}" script already present in package.json`));
     else if (r.error) console.log(kleur.yellow(`  could not patch package.json: ${r.error}`));
   }
@@ -176,8 +177,8 @@ async function ensureWatchScript(pkgPath: string): Promise<WatchScriptResult> {
 // `isImportableOutDir` lives in util/framework.ts as `isStaticOutDir`
 // (negated) — shared with `emitIndex.ts`'s AGENTS.md snippet resolver.
 
-async function ensureGitignore(): Promise<boolean> {
-  const path = resolve(process.cwd(), '.gitignore');
+export async function ensureGitignore(cwd: string = process.cwd()): Promise<boolean> {
+  const path = resolve(cwd, '.gitignore');
   const marker = '.magicpixel/';
   // Accept any of these as "already ignored" so we don't append a duplicate.
   const equivalents = new Set(['.magicpixel', '.magicpixel/', '/.magicpixel', '/.magicpixel/']);

@@ -1,14 +1,26 @@
 import kleur from 'kleur';
+import { ui } from '../util/ui.js';
+import { confirm } from '../util/prompt.js';
+
+let stepNo = 0;
+let stepTotal = 0;
+const step = (title: string) => console.log(ui.step(++stepNo, title, stepTotal));
+import type { GameIndex } from '../util/gameScan.js';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
-import { resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 
 import { configPath, loadConfig } from '../config.js';
 import { detectProjectKind, hasPackageJson, isEngineKind } from '../util/framework.js';
 import { findKeyInDotenv, readCredentialsSync, writeCredentials } from '../util/credentials.js';
 import { initCommand } from './init.js';
+import { consolidateCommand, needsConsolidation } from './consolidate.js';
+import { cleanStraysCommand } from './cleanStrays.js';
+import { runPush } from './push.js';
+import { readWorkspaceMembers } from '../util/framework.js';
+import { detectWorkspaceMembers } from '../util/workspace.js';
 import { loginCommand } from './login.js';
 import { syncCommand } from './sync.js';
 import { cmd } from '../util/invoke.js';
@@ -58,6 +70,36 @@ export async function startCommand(opts: StartOpts = {}): Promise<void> {
   console.log(kleur.dim('  This links your game project and syncs sprites both ways.'));
   console.log();
 
+  // Started inside one game folder of a monorepo: set up once at the root.
+  if (!existsSync(configPath()) && stdin.isTTY) {
+    const parent = dirname(process.cwd());
+    const siblings = detectWorkspaceMembers(parent);
+    if (siblings.length >= 2 && siblings.includes(basename(process.cwd()))) {
+      const rl = createInterface({ input: stdin, output: stdout });
+      let ans = '';
+      try {
+        ans = (await rl.question(
+          `${kleur.cyan('?')} ${basename(process.cwd())} is one of ${siblings.length} game folders in ${parent}. Set up one MagicPixel for all of them there? ${kleur.dim('(Y/n)')} `,
+        )).trim().toLowerCase();
+      } finally {
+        rl.close();
+      }
+      if (ans !== 'n' && ans !== 'no') process.chdir(parent);
+    }
+  }
+
+  // Monorepo with several game folders: merge their old setups into one here.
+  let consolidated = false;
+  const merging = needsConsolidation();
+  stepNo = 0;
+  stepTotal = merging ? 3 : 2;
+  if (merging) {
+    step('One setup for all your game folders');
+    consolidated = await consolidateCommand({});
+    if (!consolidated && !readWorkspaceMembers(process.cwd())) return;
+    console.log();
+  }
+
   const kind = await detectProjectKind();
   // Engine projects (including Unity UPM packages) have no package.json
   // requirement. JS projects still need one.
@@ -100,34 +142,33 @@ export async function startCommand(opts: StartOpts = {}): Promise<void> {
   const config = await loadConfig();
   const envKey = process.env.MAGICPIXEL_API_KEY?.trim();
   const stored = readCredentialsSync();
+  console.log();
+  step('Your MagicPixel account');
   if (!envKey && !stored) {
-    console.log();
-    console.log(kleur.bold('Step: connect your account'));
     await loginCommand();
   } else if (envKey) {
     if ((await checkKey(envKey, config)) === 'rejected') {
-      console.log(kleur.red('✖ The MAGICPIXEL_API_KEY in your environment was rejected.'));
-      console.log(kleur.dim('  Fix: set it to a fresh key from https://magicpixel.art/settings (or unset it and re-run).'));
+      console.log(ui.fail('The MAGICPIXEL_API_KEY in your environment was rejected.'));
+      console.log(ui.fix('set MAGICPIXEL_API_KEY to a fresh key from https://magicpixel.art/settings'));
       process.exitCode = 1;
       return;
     }
-    console.log(kleur.dim('  Using MAGICPIXEL_API_KEY from your environment.'));
+    console.log(ui.ok('Using MAGICPIXEL_API_KEY from your environment.'));
   } else if (stored && (await checkKey(stored.apiKey, config)) === 'rejected') {
-    console.log(kleur.yellow('! Your saved key was rejected (revoked, or from another account).'));
+    console.log(ui.warn('Your saved key was rejected (revoked, or from another account).'));
     if (!stdin.isTTY) {
-      console.log(kleur.dim(`  Fix: run \`${cmd('login')} --key mp_live_…\` with a fresh key from https://magicpixel.art/settings.`));
+      console.log(ui.fix(`${cmd('login')} --key mp_live_…`));
       process.exitCode = 1;
       return;
     }
-    console.log(kleur.bold('Step: connect your account'));
     await loginCommand();
   } else {
-    console.log(kleur.dim('  Using stored credentials from .magicpixel/credentials.'));
+    console.log(ui.ok('Signed in (saved key in .magicpixel/credentials).'));
   }
 
   // 4b. Don't push a whole game by surprise — offer one folder first.
   let folder = opts.folder?.trim();
-  if (!folder && shouldAskFolder(config.connect, !!stdin.isTTY, isEngineKind(kind))) {
+  if (!folder && !config.workspace && shouldAskFolder(config.connect, !!stdin.isTTY, isEngineKind(kind))) {
     const rl = createInterface({ input: stdin, output: stdout });
     try {
       folder = (await rl.question(
@@ -139,7 +180,7 @@ export async function startCommand(opts: StartOpts = {}): Promise<void> {
   }
   if (folder) {
     console.log();
-    console.log(kleur.bold('Step: sync one folder'));
+    step('Sync one folder');
     await connectCommand(folderToGlob(folder));
     console.log();
     console.log(kleur.dim(`  Add another folder later with \`${cmd('connect')} "<folder>/**"\`.`));
@@ -152,11 +193,14 @@ export async function startCommand(opts: StartOpts = {}): Promise<void> {
   //    print a misleading green "you're set up" over a half-failed run.
   //    Manifest 546s throw after still importing local sprites; catch so
   //    the watch instructions below aren't swallowed.
+  if (consolidated) await removeLeftoverStrays();
+  const gameIndex = await maybeFlattenLayered();
+
   console.log();
-  console.log(kleur.bold('Step: sync'));
+  step('First sync');
   const exitBefore = process.exitCode ?? 0;
   try {
-    await syncCommand({ full: true });
+    await syncCommand({ full: true }, { gameIndex });
   } catch (e) {
     const err = e as Error;
     console.error(kleur.red(err.message ?? String(e)));
@@ -172,7 +216,7 @@ export async function startCommand(opts: StartOpts = {}): Promise<void> {
   //    `npx` form so we never instruct users to run a script they don't have.
   console.log();
   if (firstSyncFailed) {
-    console.log(kleur.yellow('! first sync completed with errors.'));
+    console.log(ui.warn('first sync completed with errors.'));
     console.log(kleur.dim(`  Re-run \`${cmd('sync')}\` to retry the failed downloads, or \`${cmd('doctor')}\` to diagnose.`));
   } else {
     console.log(kleur.bold('You\'re set up. ✨'));
@@ -193,6 +237,41 @@ export async function startCommand(opts: StartOpts = {}): Promise<void> {
     console.log(kleur.dim(`       \`npx concurrently "npm run dev" "${watchCmd}"\``));
     console.log();
   }
+}
+
+/** After a merge: drop copies an older sync wrote for another folder's sprites. */
+async function removeLeftoverStrays(): Promise<void> {
+  try {
+    await cleanStraysCommand({ yes: true });
+  } catch (e) {
+    console.log(ui.warn(`couldn't check for stray copies: ${(e as Error).message.split('\n')[0]}`));
+  }
+}
+
+/**
+ * Local files win: offer to replace multi-layer MagicPixel artboards that a
+ * normal upload refuses, instead of silently skipping them.
+ */
+async function maybeFlattenLayered(): Promise<GameIndex | undefined> {
+  if (!stdin.isTTY) return undefined;
+  let keys: string[] = [];
+  let gameIndex: GameIndex | undefined;
+  try {
+    const plan = await runPush({ dryRun: true, quiet: true, nestedSync: true });
+    keys = plan.needsFlatten ?? [];
+    gameIndex = plan.gameIndex;
+  } catch {
+    return undefined;
+  }
+  if (keys.length === 0) return gameIndex;
+  console.log();
+  console.log(ui.warn(`${keys.length} of your files match a MagicPixel artboard with several layers:`));
+  for (const k of keys.slice(0, 10)) console.log(kleur.dim(`    ${k}`));
+  if (keys.length > 10) console.log(kleur.dim(`    …and ${keys.length - 10} more`));
+  if (!(await confirm(`${kleur.cyan('?')} Replace them with your local files (layers are flattened)? ${kleur.dim('(y/N)')} `))) return gameIndex;
+  const only = new Set(keys);
+  await runPush({ flatten: true, keyFilter: (k) => only.has(k), gameIndex });
+  return gameIndex;
 }
 
 async function readPkgJson(): Promise<Record<string, unknown> | null> {
@@ -234,7 +313,7 @@ async function maybeMigrateDotenvKey(): Promise<void> {
     ).trim().toLowerCase();
     if (ans === 'n' || ans === 'no') return;
     await writeCredentials(found.value);
-    console.log(kleur.green(`✓ migrated key from ${found.file} → .magicpixel/credentials`));
+    console.log(ui.ok(`migrated key from ${found.file} → .magicpixel/credentials`));
     console.log(kleur.dim(`  You can now remove the MAGICPIXEL_API_KEY line from ${found.file}.`));
   } finally {
     rl.close();

@@ -1,4 +1,5 @@
 import kleur from 'kleur';
+import { ui } from '../util/ui.js';
 import { deleteCredentials, credentialsPath } from '../util/credentials.js';
 import { relative } from 'node:path';
 
@@ -6,7 +7,7 @@ export async function logoutCommand(): Promise<void> {
   const path = credentialsPath();
   const removed = await deleteCredentials();
   if (removed) {
-    console.log(kleur.green(`✓ logged out`));
+    console.log(ui.ok(`logged out`));
     console.log(kleur.dim(`  Removed ${relative(process.cwd(), path)}.`));
   } else {
     console.log(kleur.dim('No stored credentials to remove.'));

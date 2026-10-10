@@ -1,4 +1,5 @@
 import kleur from 'kleur';
+import { ui } from '../util/ui.js';
 import { loadConfig, saveConfig } from '../config.js';
 import { assertSafeGlob } from '../util/security.js';
 
@@ -11,5 +12,5 @@ export async function addCommand(glob: string): Promise<void> {
   }
   config.include.push(pattern);
   await saveConfig(config);
-  console.log(kleur.green(`✓ added include pattern: ${pattern}`));
+  console.log(ui.ok(`added include pattern: ${pattern}`));
 }

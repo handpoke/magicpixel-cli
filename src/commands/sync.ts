@@ -1,5 +1,6 @@
 import kleur from 'kleur';
-import ora, { type Ora } from 'ora';
+import { canRedraw, card, fitLine, formatDuration, icon, progressBar, spinner as makeSpinner, ui } from '../util/ui.js';
+import type { Ora } from 'ora';
 import { mkdir, unlink, readdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
@@ -33,6 +34,7 @@ import { claimResyncRequest, reportResyncRequest } from '../api.js';
 import { runResync } from './resync.js';
 import { keyInScope, pathInScope, resolveSyncScope, scopeFingerprint } from '../util/syncScope.js';
 import { findForeignOwner, foreignOwnerMessage, recordProjectRoot } from '../util/projectRoots.js';
+import { placeBesideSiblings, splitStrayDownloads, straySkipMessage } from '../util/strayGuard.js';
 
 /** How often the watcher asks for a library "Resync from game" request. */
 const RESYNC_POLL_MS = 15_000;
@@ -65,7 +67,7 @@ async function maybeRunQueuedResync(quiet: boolean): Promise<void> {
     });
   } catch (e) {
     await reportResyncRequest(req.id, 'failed', (e as Error).message).catch(() => {});
-    if (!quiet) console.log(kleur.red(`! Resync failed: ${(e as Error).message}`));
+    if (!quiet) console.log(ui.fail(`Resync failed: ${(e as Error).message}`));
   }
 }
 
@@ -109,6 +111,8 @@ interface SyncResult {
    * pushes never appear in `added`/`modified` (those are pulls).
    */
   pushed?: PushSummary | null;
+  /** Game-owned sprites skipped because they belong to another game folder. */
+  strays?: { count: number; owner: string | null };
 }
 
 /** Did the push half of a run actually move bytes into MagicPixel? */
@@ -130,7 +134,7 @@ export function needsLocalPngWalk(since: string | undefined, toDownloadCount: nu
   return !since || toDownloadCount > 0;
 }
 
-export async function syncCommand(opts: SyncOpts): Promise<void> {
+export async function syncCommand(opts: SyncOpts, reuse: { gameIndex?: GameIndex } = {}): Promise<void> {
   // Sweep any leaked `<file>.<pid>.<hex>.tmp` files left behind by a prior
   // crashed/killed CLI run before they pile up. Runs once per CLI invocation
   // (watch mode included) and only touches files older than 30s, so it can
@@ -150,7 +154,7 @@ export async function syncCommand(opts: SyncOpts): Promise<void> {
     await watchLoop(opts);
     return;
   }
-  await runOnce(opts);
+  await runOnce(opts, { gameIndex: reuse.gameIndex });
 }
 
 async function watchLoop(opts: SyncOpts): Promise<void> {
@@ -164,7 +168,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
 
   // Header — print once on start. Counts are best-effort; if the first
   // manifest fetch fails we still want the loop to come up and retry.
-  console.log(kleur.bold('👀 MagicPixel watching for changes…'));
+  console.log(card(`${icon('watch')} MagicPixel is watching for changes`, [`Edit at ${kleur.cyan('https://magicpixel.art')}`, kleur.dim('Changes show up here as they happen · Stop: Ctrl+C')], 'info'));
   console.log(`   Edit at:  ${kleur.cyan('https://magicpixel.art')}`);
   try {
     const scope = resolveSyncScope(opts.only ?? (await loadConfig()).syncOnly);
@@ -180,7 +184,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
       const config = await loadConfig();
       const kind = await detectProjectKind();
       if (isEngineKind(kind) && (config.connect?.length ?? 0) > 0) {
-        countSpinner = ora({ text: countingSpritesText(0), spinner: 'dots' }).start();
+        countSpinner = makeSpinner({ text: countingSpritesText(0), spinner: 'dots' }).start();
       }
     } catch {
       /* header is cosmetic */
@@ -195,6 +199,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
   } else if (header.line && !opts.quiet) {
     console.log(kleur.dim(header.line));
   }
+  if (header.excluded && !opts.quiet) console.log(kleur.yellow(`   ! ${header.excluded}`));
   console.log(kleur.dim(`   Polling:  every ${intervalSec}s (slows when idle)   ·   Stop: Ctrl+C`));
   console.log();
 
@@ -230,7 +235,11 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
 
   // Re-walk the game tree on this cadence so new PNGs are ingested without
   // listing thousands of folders on every 2s tick.
-  const GAME_INDEX_TTL_MS = 30_000;
+  // Edits to already-indexed files are picked up every tick (push re-hashes
+  // them); the full tree walk only finds brand-new PNGs, so it runs rarely.
+  const GAME_INDEX_TTL_MS = 5 * 60_000;
+  const reportedIssues = new Set<string>();
+  let reportedStrays = '';
   let gameIndexCache = header.gameIndex;
   let gameIndexAt = Date.now();
 
@@ -266,8 +275,8 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
     if (inFlight || stopping) return;
     inFlight = true;
     const onStatus = (msg: string) => {
-      if (opts.quiet) return;
-      process.stdout.write(`\r\x1b[2K${kleur.dim(`${timestamp()} ${msg}`)}`);
+      if (opts.quiet || !canRedraw()) return; // in-place updates only on a live terminal
+      process.stdout.write(`\r\x1b[2K${kleur.dim(fitStatusLine(`${timestamp()} ${msg}`, process.stdout.columns))}`);
     };
     // Heartbeat: a tick that legitimately takes minutes (huge first pull, slow
     // link) must not look like the silent hang a timeout-less fetch used to
@@ -287,7 +296,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
         }, SLOW_TICK_HEARTBEAT_MS);
     heartbeat?.unref?.();
     try {
-      wrappedStatus('Checking MagicPixel…');
+      wrappedStatus(`${icon('work')} Checking MagicPixel…`);
       const reuseIndex =
         gameIndexCache && Date.now() - gameIndexAt < GAME_INDEX_TTL_MS
           ? gameIndexCache
@@ -319,16 +328,16 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
       await maybeRunQueuedResync(opts.quiet === true);
       if (wasPausedForAuth && !opts.quiet) {
         process.stdout.write('\x1b[2K\r');
-        console.log(`${kleur.dim(timestamp())} ${kleur.green('✓')} Key accepted again — resuming.`);
+        console.log(`${kleur.dim(timestamp())} ${icon('ok')} Key accepted again — resuming.`);
       }
       if (wasPausedForNetwork && !wasPausedForAuth && !opts.quiet) {
         process.stdout.write('\x1b[2K\r');
-        console.log(`${kleur.dim(timestamp())} ${kleur.green('✓')} Back online — resuming.`);
+        console.log(`${kleur.dim(timestamp())} ${icon('ok')} Back online — resuming.`);
       }
       if (wasPausedForQuota && !wasPausedForAuth && !wasPausedForNetwork && !opts.quiet) {
         process.stdout.write('\x1b[2K\r');
         console.log(
-          `${kleur.dim(timestamp())} ${kleur.green('✓')} Daily allowance available again — resuming.`,
+          `${kleur.dim(timestamp())} ${icon('ok')} Daily allowance available again — resuming.`,
         );
       }
       const changedCount = r.added.length + r.modified.length + r.removed.length + r.renamed.length;
@@ -344,16 +353,36 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
       }
 
       if (opts.quiet) return;
+      const sent = (r.pushed?.created ?? 0) + (r.pushed?.updated ?? 0);
+      const freshIssues = (r.pushed?.issues ?? []).filter((i) => !reportedIssues.has(`${i.key}\0${i.text}`));
+      const strayLine = r.strays ? `${r.strays.count}\0${r.strays.owner ?? ''}` : '';
+      if (sent > 0 || freshIssues.length > 0 || (strayLine && strayLine !== reportedStrays)) {
+        process.stdout.write('\x1b[2K\r');
+      }
+      if (sent > 0) {
+        console.log(`${kleur.dim(timestamp())} ${icon('up')} Sent ${ui.count(sent)} edited sprite${sent === 1 ? '' : 's'} to MagicPixel.`);
+      }
+      for (const i of freshIssues.slice(0, 10)) {
+        console.log(`${kleur.dim(timestamp())} ${icon('warn')} ${ui.name(i.key)}: ${i.text}`);
+      }
+      if (freshIssues.length > 10) console.log(kleur.dim(`  …and ${freshIssues.length - 10} more not sent.`));
+      for (const i of freshIssues) reportedIssues.add(`${i.key}\0${i.text}`);
+      if (strayLine && strayLine !== reportedStrays && r.strays) {
+        console.log(`${kleur.dim(timestamp())} ${icon('warn')} ${straySkipMessage(r.strays.count, r.strays.owner, `restart with ${kleur.cyan('--here')}`)}`);
+      }
+      reportedStrays = strayLine;
       if (changedCount > 0) {
         process.stdout.write('\x1b[2K\r');
         const verb = r.removed.length && !r.added.length && !r.modified.length ? 'Removed' : 'Pulled';
         console.log(
-          `${kleur.dim(timestamp())} ${kleur.green('✓')} ${verb} ${changedCount} ` +
+          `${kleur.dim(timestamp())} ${icon(verb === 'Removed' ? 'removed' : 'down')} ${verb} ${ui.count(changedCount)} ` +
             `change${changedCount === 1 ? '' : 's'} from MagicPixel:`,
         );
         printChanges(r, /* indent */ '  ');
       } else {
-        process.stdout.write(`\r\x1b[2K${kleur.dim(`${timestamp()} Waiting for edits… (${r.unchanged} up to date)`)}`);
+        if (canRedraw()) {
+          process.stdout.write(`\r\x1b[2K${kleur.dim(fitStatusLine(`${timestamp()} ${icon('watch')} Watching · all in sync (${r.unchanged.toLocaleString('en-US')} up to date)`, process.stdout.columns))}`);
+        }
       }
     } catch (e) {
       const err = e as Error;
@@ -377,17 +406,17 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
           // Surface the request id (from B1) so the user can paste it into a
           // support thread and we can correlate against edge function logs.
           const idSuffix = apiErr?.requestId ? kleur.dim(` (request id: ${apiErr.requestId})`) : '';
-          console.log(`${kleur.dim(timestamp())} ${kleur.red('✗')} Your key looks invalid or rotated.${idSuffix}`);
-          console.log(kleur.dim(`   Fix: run \`${cmd('login')}\` (this watcher will keep retrying every 30s).`));
+          console.log(`${kleur.dim(timestamp())} ${icon('fail')} Your key looks invalid or rotated.${idSuffix}`);
+          console.log(`${ui.fix(cmd('login'))}${kleur.dim(` (this watcher will keep retrying every 30s).`)}`);
         }
         pausedForAuth = true;
         consecutiveAuthFailures = decision.consecutiveAuthFailures;
         backoffSec = decision.nextBackoffSec;
         if (decision.giveUp) {
           console.log(
-            `${kleur.dim(timestamp())} ${kleur.red('✗')} Giving up after ${MAX_AUTH_FAILURES} consecutive auth failures.`,
+            `${kleur.dim(timestamp())} ${icon('fail')} Giving up after ${MAX_AUTH_FAILURES} consecutive auth failures.`,
           );
-          console.log(kleur.dim(`   Fix: run \`${cmd('login')}\` with a fresh key, then restart the watcher.`));
+          console.log(`${ui.fix(cmd('login'))}${kleur.dim(` with a fresh key, then restart the watcher.`)}`);
           // Surface this to /admin/errors — persistent watcher auth failure
           // means a key is mass-rejected (revoked, project deleted, edge
           // misconfig) and we want visibility without waiting for a support
@@ -400,7 +429,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
         if (decision.printMessage) {
           const idSuffix = apiErr?.requestId ? kleur.dim(` (request id: ${apiErr.requestId})`) : '';
           console.log(
-            `${kleur.dim(timestamp())} ${kleur.yellow('!')} MagicPixel is offline or your internet is. ` +
+            `${kleur.dim(timestamp())} ${icon('warn')} ${kleur.yellow('Paused')} — MagicPixel is offline or your internet is. ` +
               `Sprites you already have still work. Retrying in ${decision.nextBackoffSec}s.${idSuffix}`,
           );
         }
@@ -411,7 +440,7 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
         if (decision.printMessage) {
           const idSuffix = apiErr?.requestId ? kleur.dim(` (request id: ${apiErr.requestId})`) : '';
           console.log(
-            `${kleur.dim(timestamp())} ${kleur.yellow('!')} Daily MagicPixel API allowance reached. ` +
+            `${kleur.dim(timestamp())} ${icon('warn')} Daily MagicPixel API allowance reached. ` +
               `Sprites you already have still work. Resets in ${formatQuotaReset(decision.resetSec)} ` +
               `(00:00 UTC); checking again every ${Math.max(1, Math.round(decision.nextBackoffSec / 60))} min.${idSuffix}`,
           );
@@ -421,12 +450,16 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
       } else {
         consecutiveAuthFailures = 0;
         const idSuffix = apiErr?.requestId ? kleur.dim(` (request id: ${apiErr.requestId})`) : '';
-        console.log(`${kleur.dim(timestamp())} ${kleur.red('!')} ${firstLine}${idSuffix}`);
+        console.log(`${kleur.dim(timestamp())} ${icon('fail')} ${firstLine}${idSuffix}`);
         backoffSec = decision.nextBackoffSec;
       }
     } finally {
       if (heartbeat) clearInterval(heartbeat);
       inFlight = false;
+      if ((pausedForAuth || pausedForNetwork || pausedForQuota) && !opts.quiet && canRedraw()) {
+        const why = pausedForAuth ? 'waiting for a valid key' : pausedForQuota ? 'daily allowance reached' : 'offline';
+        process.stdout.write(`\r\x1b[2K${kleur.yellow(fitStatusLine(`${timestamp()} ${icon('paused')} Paused (${why}) · retrying in ${formatDuration(backoffSec * 1000)}`, process.stdout.columns))}`);
+      }
     }
   };
   await tick();
@@ -584,21 +617,24 @@ interface RunOpts {
 
 async function loadWatchHeader(
   onProgress?: (progress: ScanProgress) => void,
-): Promise<{ line: string | null; gameIndex?: GameIndex }> {
+): Promise<{ line: string | null; excluded?: string | null; gameIndex?: GameIndex }> {
   try {
     const config = await loadConfig();
     const state = await loadState();
     const lastPulled = state.assets ? Object.keys(state.assets).length : 0;
     let workingSet = 0;
     let gameIndex: GameIndex | undefined;
+    let excluded: string | null = null;
     const kind = await detectProjectKind();
     if (isEngineKind(kind) && (config.connect?.length ?? 0) > 0) {
       gameIndex = await indexGamePngs(kind, process.cwd(), config.outDir, { onProgress });
-      workingSet = matchConnectGlobs(gameIndex, config.connect, config.exclude).entries.length;
+      const matched = matchConnectGlobs(gameIndex, config.connect, config.exclude);
+      workingSet = matched.entries.length;
+      excluded = describeExcluded(matched);
     } else if (state.synced) {
       workingSet = Object.keys(state.synced).length;
     }
-    return { line: formatWatchSpriteLine({ workingSet, lastPulled }), gameIndex };
+    return { line: formatWatchSpriteLine({ workingSet, lastPulled }), excluded, gameIndex };
   } catch {
     return { line: null };
   }
@@ -621,7 +657,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   const shouldPrune = opts.prune !== false;  // commander: --no-prune sets false
 
   if (verbose && config.endpoint) {
-    console.log(kleur.yellow(`! using custom endpoint: ${config.endpoint}`));
+    console.log(ui.warn(`using custom endpoint: ${config.endpoint}`));
   }
 
   // Incremental unless asked for a full run — or unless a full pass is due:
@@ -639,7 +675,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   const previousAssets = state.assets ?? {};  // id → key from prior sync
 
   const spinner: Ora | null = verbose
-    ? ora(since ? `Fetching manifest since ${humanTime(since)}…` : 'Fetching manifest…').start()
+    ? makeSpinner(since ? `Fetching manifest since ${humanTime(since)}…` : 'Fetching manifest…').start()
     : null;
   if (!spinner) onStatus?.(since ? 'Checking MagicPixel for edits…' : 'Fetching your sprites from MagicPixel…');
   let manifest: ManifestEntry[];
@@ -687,7 +723,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     // Full read + empty project is the only safe "cloud is empty" signal.
     if (resetStateIfProjectChanged(state, projectInfo?.id, !since && snapshot.entries.length === 0)) {
       await saveState(state);
-      if (verbose) console.log(kleur.yellow(`! ${PROJECT_CHANGED_MESSAGE}`));
+      if (verbose) console.log(ui.warn(`${PROJECT_CHANGED_MESSAGE}`));
     }
     const projectSuffix = projectInfo && verbose
       ? kleur.dim(` · project: ${projectInfo.name ?? projectInfo.id.slice(0, 8)}`)
@@ -701,7 +737,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     // so the user isn't left wondering why sync "did nothing".
     if (!since && manifest.length === 0 && projectInfo?.hint && verbose) {
       console.log();
-      console.log(kleur.yellow(`! ${projectInfo.hint}`));
+      console.log(ui.warn(`${projectInfo.hint}`));
     }
   } catch (e) {
     spinner?.fail('Manifest fetch failed');
@@ -712,7 +748,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       const pushed = await maybePushLocalSprites(config.push, verbose);
       if (verbose && pushed && pushed.created > 0) {
         console.log();
-        console.log(kleur.green(`✓ pushed ${pushed.created} working-set sprite${pushed.created === 1 ? '' : 's'} into MagicPixel anyway.`));
+        console.log(ui.ok(`pushed ${pushed.created} working-set sprite${pushed.created === 1 ? '' : 's'} into MagicPixel anyway.`));
         console.log(kleur.dim('  Refresh Connected in the library to see them, then re-run sync to pull.'));
       }
     }
@@ -730,9 +766,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
             const n = p.pngs.toLocaleString('en-US');
             const f = p.folders.toLocaleString('en-US');
             onStatus?.(
-              p.current
-                ? `Looking through your game sprites…  ${n} sprites · ${f} folders  ·  ${p.current}`
-                : p.folders > 0
+              p.folders > 0
                   ? `Looking through your game sprites…  ${n} sprites · ${f} folders`
                   : `Looking through your game sprites…  ${n}`,
             );
@@ -775,6 +809,14 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     }
   }
   aliasCollisionKeys(sourceByKey, manifest.map((e) => e.key));
+  if (isEngineKind(projectKind)) {
+    placeBesideSiblings(sourceByKey, manifest, new Set(fullGameIndex.files.map((f) => f.sourceRel)));
+  }
+  if (verbose && gameIndex.keyClashes?.length) {
+    console.log(ui.warn(`${gameIndex.keyClashes.length} file${gameIndex.keyClashes.length === 1 ? '' : 's'} share a name with a file in another game folder — skipped:`));
+    for (const r of gameIndex.keyClashes.slice(0, 5)) console.log(kleur.dim(`    ${r}`));
+    console.log(ui.fixText('rename one of them so each sprite has its own name.'));
+  }
   if (verbose && isEngineKind(projectKind)) {
     console.log(
       kleur.dim(
@@ -815,8 +857,8 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       const n = filtered.unknown.length;
       const msg = `${n} artboard${n === 1 ? '' : 's'} came back without a game-sync flag — skipped (existing files kept).`;
       if (verbose) {
-        console.log(kleur.yellow(`! ${msg}`));
-        console.log(kleur.dim(`  Fix: re-run \`${cmd('sync')}\` in a moment, or upgrade with \`npm i -D @magicpixelart/cli@latest\`.`));
+        console.log(ui.warn(`${msg}`));
+        console.log(ui.fixText(`re-run \`${cmd('sync')}\` in a moment, or upgrade with \`npm i -D @magicpixelart/cli@latest\`.`));
       } else {
         onStatus?.(msg);
       }
@@ -890,7 +932,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   );
   const diffLimit = createLimit(concurrency);
   const shaByEntryId = new Map<string, string | null>();
-  const toDownload: ManifestEntry[] = [];
+  let toDownload: ManifestEntry[] = [];
   const conflicts: string[] = [];
   const failedDownloadKeys = new Set<string>();
   let bytesSaved = 0;
@@ -982,6 +1024,23 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   // Wrong-folder guard: sprites connected to another game folder on this
   // machine would land here as stray copies under outDir. Stop before writing.
   const projectIdForRoots = getLastProjectInfo()?.id;
+  // Game-owned sprites (server flag) with no home in this folder are skipped —
+  // this works even on a machine where the owning folder never synced.
+  let strays: SyncResult['strays'];
+  if (!opts.here) {
+    const split = splitStrayDownloads(toDownload, [...sourceByKey.keys(), ...connected.entries.map((e) => e.key)]);
+    if (split.foreign.length > 0) {
+      toDownload = split.keep;
+      const owner = projectIdForRoots
+        ? await findForeignOwner(projectIdForRoots, process.cwd(), split.foreign.map((e) => e.key))
+        : null;
+      strays = { count: split.foreign.length, owner: owner?.root ?? null };
+      if (verbose) {
+        console.log();
+        console.log(ui.warn(straySkipMessage(strays.count, strays.owner, `add ${kleur.cyan('--here')}`)));
+      }
+    }
+  }
   if (projectIdForRoots && !opts.here) {
     const owner = await findForeignOwner(
       projectIdForRoots,
@@ -1232,7 +1291,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
 
   if (opts.dryRun) {
     if (verbose) {
-      console.log(kleur.dim('--dry-run: no files written.'));
+      console.log(ui.dryRun());
       if (renamed.length > 0) printRenames(renamed, { withHints: false });
       if (orphans.length > 0) printOrphans(orphans);
       if (legacyFolders.length > 0) printLegacyFolders(legacyFolders);
@@ -1265,7 +1324,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
   let progress: Ora | null = null;
   if (live && toDownload.length > 0) {
     onStatus?.(`Pulling ${toDownload.length.toLocaleString('en-US')} updated sprite${toDownload.length === 1 ? '' : 's'}…`);
-    progress = ora({ text: progressText(0, toDownload.length, 0), spinner: 'dots' }).start();
+    progress = makeSpinner({ text: progressText(0, toDownload.length, 0), spinner: 'dots' }).start();
   }
 
   const run = createLimit(concurrency);
@@ -1332,10 +1391,10 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
           // so the user sees the fix hint. Single-line errors stay terse.
           const msg = (e as Error).message ?? String(e);
           if (msg.includes('\n')) {
-            console.log(`  ${kleur.red('!')} ${entry.key}:`);
+            console.log(`  ${icon('fail')} ${entry.key}:`);
             for (const line of msg.split('\n')) console.log(`     ${line}`);
           } else {
-            console.log(`  ${kleur.red('!')} ${entry.key}: ${msg}`);
+            console.log(`  ${icon('fail')} ${entry.key}: ${msg}`);
           }
           progress?.start();
         } finally {
@@ -1397,7 +1456,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
         result.removed.push(key);
         if (verbose) console.log(`  ${kleur.red('-')} ${relative(process.cwd(), p)}`);
       } catch (e) {
-        if (verbose) console.log(`  ${kleur.yellow('!')} failed to prune ${relative(process.cwd(), p)}: ${(e as Error).message}`);
+        if (verbose) console.log(`  ${icon('warn')} failed to prune ${relative(process.cwd(), p)}: ${(e as Error).message}`);
       }
     }
     await pruneEmptyDirs(resolve(process.cwd(), config.outDir));
@@ -1425,7 +1484,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
           );
         }
       } catch (e) {
-        if (verbose) console.log(`  ${kleur.yellow('!')} failed to remove legacy folder ${relative(process.cwd(), lf.abs)}: ${(e as Error).message}`);
+        if (verbose) console.log(`  ${icon('warn')} failed to remove legacy folder ${relative(process.cwd(), lf.abs)}: ${(e as Error).message}`);
       }
     }
     // Always surface the import-update notice — even in --quiet/watch mode
@@ -1609,25 +1668,29 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
 
   if (verbose) {
     console.log();
-    const summary =
-      `downloaded ${downloaded} (added ${result.added.length}, modified ${result.modified.length}), ` +
-      `unchanged ${result.unchanged}` +
-      (result.bytesSaved ? kleur.dim(` (~${formatBytes(result.bytesSaved)} saved)`) : '') +
-      (shouldPrune ? `, pruned ${result.removed.length}` : '') +
-      (renamed.length ? `, renamed ${renamed.length}` : '') +
-      (result.failed ? `, failed ${result.failed}` : '');
     const pushFailed = (pushed?.conflict ?? 0) + (pushed?.error ?? 0);
+    const skipped = pushed?.issues.length ?? 0;
+    const sent = (pushed?.created ?? 0) + (pushed?.updated ?? 0);
+    const rows = [
+      `${icon('down')} ${ui.count(downloaded)} downloaded   ${icon('up')} ${ui.count(sent)} uploaded`,
+      `${icon('ok')} ${ui.count(result.unchanged)} unchanged` +
+        (shouldPrune && result.removed.length ? `   ${icon('removed')} ${ui.count(result.removed.length)} removed` : '') +
+        (skipped ? `   ${icon('warn')} ${ui.count(skipped)} skipped` : ''),
+      ...(renamed.length ? [`↪ ${ui.count(renamed.length)} renamed — see below`] : []),
+      ...(result.failed || pushFailed ? [`${icon('fail')} ${ui.count(result.failed + pushFailed)} failed — re-run to retry`] : []),
+      kleur.dim(`${icon('time')} ${formatDuration(Date.now() - Date.parse(startedAt))}${result.bytesSaved ? ` · ~${formatBytes(result.bytesSaved)} saved` : ''}`),
+    ];
     console.log(
       result.failed || pushFailed
-        ? kleur.yellow(`Sync finished with issues. ${summary}`)
-        : kleur.green(`✓ Sync complete. ${summary}`),
+        ? card(`${icon('warn')} Sync finished with issues`, rows, 'warn')
+        : card(`${icon('sparkle')} Sync complete`, rows, 'ok'),
     );
     printChanges(result, '  ', { includeRenames: renamed.length === 0 });
     if (renamed.length > 0) printRenames(renamed, { withHints: true });
   }
 
   if (result.failed) process.exitCode = 1;
-  return { ...result, pushed };
+  return { ...result, pushed, ...(strays ? { strays } : {}) };
 }
 
 async function maybePushLocalSprites(
@@ -1644,8 +1707,8 @@ async function maybePushLocalSprites(
   } catch (e) {
     if (announceErrors) {
       console.log();
-      console.log(kleur.yellow(`! could not update MagicPixel from your game files: ${(e as Error).message}`));
-      console.log(kleur.dim(`  Fix: run \`${cmd('push')}\` once the connection is healthy.`));
+      console.log(ui.warn(`could not update MagicPixel from your game files: ${(e as Error).message}`));
+      console.log(ui.fixText(`run \`${cmd('push')}\` once the connection is healthy.`));
     }
     return null;
   }
@@ -1684,11 +1747,12 @@ function printRenames(renamed: RenameInfo[], opts: { withHints: boolean }): void
 }
 
 function progressText(done: number, total: number, bytes: number): string {
-  const pct = total === 0 ? 100 : Math.round((done / total) * 100);
-  const barWidth = 24;
-  const filled = Math.round((pct / 100) * barWidth);
-  const bar = '█'.repeat(filled) + '░'.repeat(barWidth - filled);
-  return `${bar}  ${done}/${total}  ${kleur.dim(formatBytes(bytes))}`;
+  return `${icon('down')} ${progressBar(done, total)}  ${kleur.dim(formatBytes(bytes))}`;
+}
+
+/** Cut a status line to the terminal width so `\r` redraws never wrap. */
+export function fitStatusLine(line: string, columns: number | undefined): string {
+  return fitLine(line, columns);
 }
 
 function timestamp(): string {

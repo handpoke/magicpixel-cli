@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { relative, resolve } from 'node:path';
 
@@ -86,7 +86,27 @@ function hasMetaSidecar(dir: string): boolean {
   }
 }
 
-function detectEngineKind(cwd: string): ProjectKind {
+/**
+ * Members of a monorepo workspace (`magicpixel.json` with `"workspace": true`),
+ * as root-relative folder names. Null when `cwd` is not a workspace root.
+ */
+export function readWorkspaceMembers(cwd: string): string[] | null {
+  try {
+    const parsed = JSON.parse(readFileSync(resolve(cwd, 'magicpixel.json'), 'utf8')) as {
+      workspace?: unknown;
+      members?: unknown;
+    };
+    if (parsed?.workspace !== true || !Array.isArray(parsed.members)) return null;
+    const members = parsed.members.filter(
+      (m): m is string => typeof m === 'string' && /^[^/\\.][^/\\]*$/.test(m) && m !== '..',
+    );
+    return members.length > 0 ? members : null;
+  } catch {
+    return null;
+  }
+}
+
+export function detectEngineKind(cwd: string): ProjectKind {
   if (existsSync(resolve(cwd, 'project.godot'))) return 'Godot';
   const projectSettings = resolveChildDir(cwd, 'ProjectSettings');
   if (projectSettings && resolveChild(projectSettings, 'ProjectVersion.txt')) return 'Unity';
@@ -112,6 +132,7 @@ function detectEngineKind(cwd: string): ProjectKind {
 
 /** Infer project kind from package.json deps, then engine marker files. */
 export async function detectProjectKind(cwd: string = process.cwd()): Promise<ProjectKind> {
+  if (readWorkspaceMembers(cwd)) return 'Unity';
   const js = await detectJsKind(cwd);
   if (js) return js;
   return detectEngineKind(cwd);

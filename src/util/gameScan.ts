@@ -7,7 +7,7 @@ import { existsSync } from 'node:fs';
 import { opendir, readdir } from 'node:fs/promises';
 import { relative, resolve } from 'node:path';
 import type { ProjectKind } from './framework.js';
-import { isEngineKind, resolveChildDir } from './framework.js';
+import { detectEngineKind, isEngineKind, readWorkspaceMembers, resolveChildDir } from './framework.js';
 import { assertPathInsideRoot, sanitizeSourceRel } from './security.js';
 import { gameImportAdoptPath } from './pushPlan.js';
 import { matchGlob } from './globMatch.js';
@@ -86,10 +86,25 @@ export interface GameIndexEntry {
   adoptRel: string;
   /** Manifest-style key (`sprites/hero/hero`). */
   key: string;
+  /** Workspace only: the game folder this file lives in (`kr-core`). Keys and
+   *  `adoptRel` stay relative to it, so cloud names match per-folder syncs. */
+  member?: string;
 }
 
 export interface GameIndex {
   files: GameIndexEntry[];
+  /** Workspace only: files dropped because another game folder already uses their key. */
+  keyClashes?: string[];
+}
+
+/** Does a connect/exclude glob select this file? (cwd-, asset-root-, member- or key-relative) */
+export function entryMatchesGlob(e: GameIndexEntry, g: string): boolean {
+  return (
+    matchGlob(e.sourceRel, g) ||
+    matchGlob(e.adoptRel, g) ||
+    matchGlob(e.key, g) ||
+    (!!e.member && matchGlob(`${e.member}/${e.adoptRel}`, g))
+  );
 }
 
 function importRel(abs: string, cwd: string, assetRoot: string | null): string {
@@ -211,13 +226,54 @@ export async function indexGamePngs(
   const scanRoot = resolve(cwd);
   if (!existsSync(scanRoot)) return empty;
   const destNorm = outDir ? resolve(cwd, outDir).replace(/\\/g, '/').toLowerCase() : '';
-  const namedRoot = gameScanRoot(kind);
-  const assetRoot = namedRoot ? resolveChildDir(cwd, namedRoot) : null;
-
-  const found: string[] = [];
-  const stats = { folders: 0 };
+  const stats = { folders: 0, pngs: 0 };
   const io = createLimit(SCAN_WALK_CONCURRENCY);
   const report = bindScanProgress(opts.onProgress);
+
+  const members = readWorkspaceMembers(scanRoot);
+  if (members) {
+    // Each game folder is indexed exactly as if sync ran inside it (same keys),
+    // then its paths are re-rooted at the workspace.
+    const byKey = new Map<string, GameIndexEntry>();
+    const keyClashes: string[] = [];
+    for (const member of members) {
+      const dir = resolve(scanRoot, member);
+      if (!existsSync(dir)) continue;
+      const memberKind = detectEngineKind(dir) ?? kind;
+      for (const e of await indexOne(memberKind, dir, destNorm, io, report, stats)) {
+        const sourceRel = sanitizeSourceRel(`${member}/${e.sourceRel}`);
+        if (!sourceRel) continue;
+        if (byKey.has(e.key)) { keyClashes.push(sourceRel); continue; }
+        byKey.set(e.key, { ...e, sourceRel, member });
+      }
+    }
+    report.flush?.();
+    opts.onProgress?.({ pngs: stats.pngs, folders: stats.folders });
+    const files = [...byKey.values()].sort((a, b) => a.sourceRel.localeCompare(b.sourceRel));
+    return keyClashes.length ? { files, keyClashes } : { files };
+  }
+
+  const files = await indexOne(kind, scanRoot, destNorm, io, report, stats);
+  report.flush?.();
+  opts.onProgress?.({ pngs: stats.pngs, folders: stats.folders });
+  return { files };
+}
+
+/** Index one game folder (project or package). Paths are relative to `cwd`. */
+async function indexOne(
+  kind: ProjectKind,
+  cwd: string,
+  destNorm: string,
+  io: ReturnType<typeof createLimit>,
+  baseReport: VisitFn,
+  stats: { folders: number; pngs: number },
+): Promise<GameIndexEntry[]> {
+  const scanRoot = resolve(cwd);
+  const namedRoot = gameScanRoot(kind);
+  const assetRoot = namedRoot ? resolveChildDir(cwd, namedRoot) : null;
+  const found: string[] = [];
+  const offset = stats.pngs;
+  const report: VisitFn = (pngs, folders, current) => baseReport(offset + pngs, folders, current);
   // Full Unity games: walk Assets/ only. Listing the project root waits on
   // Library/Packages/cloud placeholders and looks hung at "1 folder".
   const startAt = isUnityGameProject(cwd, assetRoot) ? assetRoot! : scanRoot;
@@ -230,8 +286,7 @@ export async function indexGamePngs(
       await walkPngs(dir, scanRoot, destNorm, found, Infinity, io, report, stats, null);
     }
   }
-  report.flush?.();
-  opts.onProgress?.({ pngs: found.length, folders: stats.folders });
+  stats.pngs += found.length;
   found.sort((a, b) => a.localeCompare(b));
 
   const files: GameIndexEntry[] = [];
@@ -239,7 +294,7 @@ export async function indexGamePngs(
     const entry = toEntry(abs, scanRoot, assetRoot);
     if (entry) files.push(entry);
   }
-  return { files };
+  return files;
 }
 
 /** One-line summary of exclude-dropped files, or null when none. */
@@ -276,8 +331,7 @@ export function matchConnectGlobs(
   exclude: readonly string[] = [],
 ): ConnectMatchResult {
   if (globs.length === 0) return { entries: [] };
-  const hit = (e: GameIndexEntry, g: string) =>
-    matchGlob(e.sourceRel, g) || matchGlob(e.adoptRel, g) || matchGlob(e.key, g);
+  const hit = entryMatchesGlob;
   // `exclude` wins over `connect`: excluded game files are never uploaded.
   const matched: GameIndexEntry[] = [];
   const byRule = new Map<string, number>();

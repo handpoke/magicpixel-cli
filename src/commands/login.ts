@@ -1,4 +1,5 @@
 import kleur from 'kleur';
+import { ui } from '../util/ui.js';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { loadConfig, defaultConfig, type MagicPixelConfig } from '../config.js';
@@ -42,7 +43,7 @@ export async function loginCommand(opts: LoginOpts = {}): Promise<void> {
 
   const path = await writeCredentials(key);
   console.log();
-  console.log(kleur.green('✓ logged in'));
+  console.log(ui.ok('logged in'));
   console.log(kleur.dim(`  Key stored at ${relative(process.cwd(), path)} (mode 0600).`));
   if (process.env.MAGICPIXEL_API_KEY) {
     console.log(

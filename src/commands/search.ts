@@ -1,5 +1,5 @@
 import kleur from 'kleur';
-import ora from 'ora';
+import { spinner as makeSpinner } from '../util/ui.js';
 import { loadConfig } from '../config.js';
 import { detectProjectKind, isEngineKind } from '../util/framework.js';
 import { indexGamePngs, searchGameIndex, countingSpritesText } from '../util/gameScan.js';
@@ -27,7 +27,7 @@ export async function searchCommand(query: string): Promise<void> {
   } catch {
     // Config is optional for search — skip MagicPixel outDir when missing.
   }
-  const spinner = ora({ text: countingSpritesText(0), spinner: 'dots' }).start();
+  const spinner = makeSpinner({ text: countingSpritesText(0), spinner: 'dots' }).start();
   const index = await indexGamePngs(kind, process.cwd(), outDir, {
     onProgress: (p) => { spinner.text = countingSpritesText(p); },
   });

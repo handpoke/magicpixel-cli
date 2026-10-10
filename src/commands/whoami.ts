@@ -1,4 +1,5 @@
 import kleur from 'kleur';
+import { ui } from '../util/ui.js';
 import { loadConfig, defaultConfig, resolveEndpoint, getApiKey, type MagicPixelConfig } from '../config.js';
 import { ApiError, errorCodeFromResponse, friendlyApiError, retryTransient, retryAfterMsFromResponse, getLastProjectInfo, type ManifestProjectInfo } from '../api.js';
 import { safeFetch } from '../util/security.js';
@@ -90,21 +91,21 @@ export async function whoamiCommand(): Promise<void> {
   });
 
   if (result.kind === 'rejected') {
-    console.log(kleur.red(`✗ API key rejected (${result.status}).`));
+    console.log(ui.fail(`API key rejected (${result.status}).`));
     console.log(kleur.dim('  Generate a new key at MagicPixel → Settings → API Keys.'));
     console.log(kleur.dim(`  (request id: ${result.serverRequestId})`));
     process.exitCode = 1;
     return;
   }
   if (result.kind === 'error') {
-    console.log(kleur.red(`✗ ${result.status}: ${result.bodyText.slice(0, 200)}`));
+    console.log(ui.fail(`${result.status}: ${result.bodyText.slice(0, 200)}`));
     console.log(kleur.dim(`  (request id: ${result.serverRequestId})`));
     process.exitCode = 1;
     return;
   }
   const { body, project } = result;
   const more = body.nextCursor ? '+' : '';
-  console.log(kleur.green('✓ key valid'));
+  console.log(ui.ok('key valid'));
   console.log(`  endpoint: ${resolveEndpoint(config)}`);
   if (project) {
     const label = project.name ?? '(unnamed)';

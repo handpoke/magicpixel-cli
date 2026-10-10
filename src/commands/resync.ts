@@ -7,7 +7,10 @@
  *   - MagicPixel files in that folder with no local file go to Trash.
  */
 import kleur from 'kleur';
-import { createInterface } from 'node:readline/promises';
+import { ui } from '../util/ui.js';
+import { confirm } from '../util/prompt.js';
+import { canRedraw } from '../util/ui.js';
+import { stripMemberSegment } from '../util/workspace.js';
 import { stdin, stdout } from 'node:process';
 
 import { loadConfig, loadState } from '../config.js';
@@ -35,11 +38,11 @@ export function slugifySegment(input: string): string {
 }
 
 export function parseFolderArg(folder: string): string[] {
-  return folder
+  return stripMemberSegment(folder
     .replace(/\\/g, '/')
     .split('/')
     .map((s) => slugifySegment(s.trim()))
-    .filter(Boolean);
+    .filter(Boolean));
 }
 
 /**
@@ -54,16 +57,6 @@ export function keyInFolder(key: string, segments: readonly string[]): boolean {
   return segments.every((s, i) => folderParts[i] === s);
 }
 
-async function confirm(prompt: string): Promise<boolean> {
-  if (!stdin.isTTY) return false;
-  const rl = createInterface({ input: stdin, output: stdout });
-  try {
-    const a = (await rl.question(prompt)).trim().toLowerCase();
-    return a === 'y' || a === 'yes';
-  } finally {
-    rl.close();
-  }
-}
 
 export async function resyncCommand(folder: string, opts: ResyncOpts = {}): Promise<void> {
   await runResync(parseFolderArg(folder), opts);
@@ -79,9 +72,9 @@ export async function runResync(segments: string[], opts: ResyncOpts = {}): Prom
   if (!isEngineKind(kind)) throw new Error('This folder is not a Unity/Godot/GameMaker project.');
 
   const gameIndex = await indexGamePngs(kind, process.cwd(), config.outDir, {
-    onProgress: opts.quiet ? undefined : (p) => { stdout.write(`\r${countingSpritesText(p)}`); },
+    onProgress: opts.quiet || !canRedraw() ? undefined : (p) => { stdout.write(`\r${countingSpritesText(p)}`); },
   });
-  if (!opts.quiet) stdout.write('\n');
+  if (!opts.quiet && canRedraw()) stdout.write('\n');
   const keyFilter = (key: string) => keyInFolder(key, segments);
   const label = segments.join('/');
 
@@ -125,7 +118,7 @@ export async function runResync(segments: string[], opts: ResyncOpts = {}): Prom
     const res = await pruneResyncFolder(segments, push.keptAssetIds, false);
     trashed = res.trashed;
   }
-  if (pruneSkipped) log(kleur.yellow(`! Nothing moved to Trash (${pruneSkipped}). Re-run once fixed.`));
-  else log(kleur.green(`✓ ${label} resynced. ${trashed} file${trashed === 1 ? '' : 's'} moved to Trash.`));
+  if (pruneSkipped) log(ui.warn(`Nothing moved to Trash (${pruneSkipped}). Re-run once fixed.`));
+  else log(ui.ok(`${label} resynced. ${trashed} file${trashed === 1 ? '' : 's'} moved to Trash.`));
   return { push, trashed, pruneSkipped };
 }

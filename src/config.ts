@@ -32,6 +32,10 @@ export interface MagicPixelConfig {
   connect: string[];
   /** Optional default for `sync --only`: game folders a plain `sync` is limited to. */
   syncOnly?: string[];
+  /** Monorepo root: one setup for several game folders (see util/workspace.ts). */
+  workspace?: true;
+  /** Root-relative game folders of the workspace (e.g. `kr-core`). */
+  members?: string[];
 }
 
 /**
@@ -241,6 +245,9 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<MagicPixe
     push: parsed.push === false ? false : undefined,
     connect,
     ...(parsed.syncOnly !== undefined ? { syncOnly: normalizeGlobList(parsed.syncOnly, 'syncOnly') } : {}),
+    ...(parsed.workspace === true && Array.isArray(parsed.members)
+      ? { workspace: true as const, members: normalizeGlobList(parsed.members, 'members') }
+      : {}),
   };
 }
 

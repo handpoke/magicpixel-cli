@@ -1,4 +1,5 @@
 import kleur from 'kleur';
+import { ui } from '../util/ui.js';
 import { loadConfig, saveConfig } from '../config.js';
 import { assertSafeGlob } from '../util/security.js';
 
@@ -12,5 +13,5 @@ export async function removeCommand(glob: string): Promise<void> {
     return;
   }
   await saveConfig(config);
-  console.log(kleur.green(`✓ removed include pattern: ${pattern}`));
+  console.log(ui.ok(`removed include pattern: ${pattern}`));
 }

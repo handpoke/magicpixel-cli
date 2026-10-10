@@ -1,4 +1,5 @@
 import kleur from 'kleur';
+import { icon } from '../util/ui.js';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { resolve, relative } from 'node:path';
@@ -287,11 +288,11 @@ export function renderDoctorReport(r: DoctorReport): string {
         : `skipped (no API key — run \`${cmd('login')}\`)`;
     push(`Network probe:      ${kleur.dim(reason)}`);
   } else if (r.network.ok) {
-    push(`Network probe:      ${kleur.green('✓')} ${r.network.status} in ${r.network.roundtripMs}ms`);
+    push(`Network probe:      ${icon('ok')} ${r.network.status} in ${r.network.roundtripMs}ms`);
     if (r.network.requestId) push(`  request id:       ${kleur.dim(r.network.requestId)}`);
   } else {
     const statusLabel = r.network.status !== null ? `HTTP ${r.network.status}` : 'no response';
-    push(`Network probe:      ${kleur.red('✗')} ${statusLabel} (${r.network.roundtripMs}ms)`);
+    push(`Network probe:      ${icon('fail')} ${statusLabel} (${r.network.roundtripMs}ms)`);
     if (r.network.requestId) push(`  request id:       ${kleur.dim(r.network.requestId)}`);
     if (r.network.error) push(`  error:            ${kleur.dim(r.network.error)}`);
   }

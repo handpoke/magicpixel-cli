@@ -1,5 +1,5 @@
 import kleur from 'kleur';
-import ora from 'ora';
+import { spinner as makeSpinner, ui } from '../util/ui.js';
 import { loadConfig, saveConfig } from '../config.js';
 import { assertSafeGlob } from '../util/security.js';
 import { detectProjectKind, isEngineKind } from '../util/framework.js';
@@ -27,7 +27,7 @@ export async function connectCommand(glob: string): Promise<void> {
   if (changed) {
     config.connect = next;
     await saveConfig(config);
-    console.log(kleur.green(`✓ now syncing ${describeWorkingSet(pattern)}`));
+    console.log(ui.ok(`now syncing ${describeWorkingSet(pattern)}`));
   }
 
   const kind = await detectProjectKind();
@@ -36,7 +36,7 @@ export async function connectCommand(glob: string): Promise<void> {
     return;
   }
 
-  const spinner = ora({ text: countingSpritesText(0), spinner: 'dots' }).start();
+  const spinner = makeSpinner({ text: countingSpritesText(0), spinner: 'dots' }).start();
   const index = await indexGamePngs(kind, process.cwd(), config.outDir, {
     onProgress: (p) => { spinner.text = countingSpritesText(p); },
   });

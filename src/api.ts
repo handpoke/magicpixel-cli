@@ -45,6 +45,9 @@ export interface ManifestEntry {
   layer_idx?: number;
   /** Layer count of the artboard. Absent on stale caches. */
   layer_count?: number;
+  /** Lives in a connected (game-synced) folder — the PNG belongs to a game
+   *  file, so it must never be copied into an unrelated folder's outDir. */
+  game?: boolean;
 }
 
 export interface ManifestProjectInfo {

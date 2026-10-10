@@ -8,7 +8,7 @@
  */
 
 import kleur from 'kleur';
-import ora from 'ora';
+import { icon, progressBar, spinner as makeSpinner, ui } from '../util/ui.js';
 import { mkdir, readFile, rename } from 'node:fs/promises';
 import { dirname, relative, resolve } from 'node:path';
 
@@ -54,6 +54,12 @@ export interface PushOpts {
   keyFilter?: (key: string) => boolean;
 }
 
+/** A local sprite that did not reach MagicPixel, with a one-line reason. */
+export interface PushIssue {
+  key: string;
+  text: string;
+}
+
 export interface PushSummary {
   created: number;
   updated: number;
@@ -65,6 +71,29 @@ export interface PushSummary {
   keptAssetIds: string[];
   /** Local sprites in scope (after keyFilter). */
   scanned: number;
+  /** Sprites skipped or refused — surfaced by `sync`/`sync --watch`, which run push quietly. */
+  issues: PushIssue[];
+  /** Keys refused because the MagicPixel artboard has several layers (needs `--flatten`). */
+  needsFlatten?: string[];
+  /** The game index this run scanned, so a follow-up sync needn't walk again. */
+  gameIndex?: GameIndex;
+}
+
+/** Plain-language skip reasons for the quiet (nested-in-sync) push path. */
+export function skipIssues(
+  legacy: readonly { key: string }[],
+  flattenBlocked: readonly { key: string; layers?: number }[],
+): PushIssue[] {
+  return [
+    ...legacy.map((a) => ({
+      key: a.key,
+      text: 'MagicPixel file is a legacy single image — open it in MagicPixel and save once, then sync again.',
+    })),
+    ...flattenBlocked.map((a) => ({
+      key: a.key,
+      text: `MagicPixel artboard has ${a.layers ?? 'several'} layers — run \`${cmd('push')} --flatten\` to replace it with your file.`,
+    })),
+  ];
 }
 
 export async function pushCommand(opts: PushOpts = {}): Promise<void> {
@@ -85,7 +114,7 @@ export async function runPush(opts: PushOpts = {}): Promise<PushSummary> {
     const page = await fetchManifestPage({ config, limit: 1 });
     if (resetStateIfProjectChanged(state, getLastProjectInfo()?.id, page.items.length === 0)) {
       if (!opts.dryRun) await saveState(state);
-      if (!opts.quiet) console.log(kleur.yellow(`! ${PROJECT_CHANGED_MESSAGE}`));
+      if (!opts.quiet) console.log(ui.warn(`${PROJECT_CHANGED_MESSAGE}`));
     }
   }
   return runPushWith(config, state, opts);
@@ -99,10 +128,10 @@ export async function runPushWith(
   const quiet = opts.quiet === true;
   if (opts.replace) opts = { ...opts, flatten: true };
   const empty: PushSummary = {
-    created: 0, updated: 0, unchanged: 0, conflict: 0, error: 0, imported: 0, keptAssetIds: [], scanned: 0,
+    created: 0, updated: 0, unchanged: 0, conflict: 0, error: 0, imported: 0, keptAssetIds: [], scanned: 0, issues: [],
   };
 
-  const spinner = quiet ? null : ora(countingSpritesText(0)).start();
+  const spinner = quiet ? null : makeSpinner(countingSpritesText(0)).start();
   const kind = await detectProjectKind();
   const index = opts.gameIndex
     ?? (isEngineKind(kind)
@@ -136,11 +165,10 @@ export async function runPushWith(
   let hashed = 0;
   const reportHash = () => {
     hashed++;
-    const n = hashed.toLocaleString('en-US');
-    const t = toHash.length.toLocaleString('en-US');
-    if (spinner) spinner.text = `Checking your game files…  ${n} / ${t}`;
+    const line = `Checking your game files  ${progressBar(hashed, toHash.length)}`;
+    if (spinner) spinner.text = line;
     else if (opts.onStatus && (hashed === 1 || hashed === toHash.length || hashed % 25 === 0)) {
-      opts.onStatus(`Checking your game files…  ${n} / ${t}`);
+      opts.onStatus(`${icon('work')} ${line}`);
     }
   };
   await Promise.all(
@@ -198,6 +226,10 @@ export async function runPushWith(
   const legacy = actions.filter((a) => a.kind === 'skip' && a.reason === 'legacy');
   const flattenBlocked = actions.filter((a) => a.kind === 'needs-flatten');
   const sendable = actions.filter((a) => a.kind === 'update' || a.kind === 'adopt');
+  const preIssues = skipIssues(
+    legacy,
+    flattenBlocked.map((a) => ({ key: a.key, ...('layers' in a && typeof a.layers === 'number' ? { layers: a.layers } : {}) })),
+  );
   spinner?.succeed(
     `Local sprites: ${candidates.length} · to push ${sendable.length} · unchanged ${skipped}` +
       (matched.entries.length ? ` · connected ${matched.entries.length}` : ''),
@@ -210,17 +242,17 @@ export async function runPushWith(
       ),
     );
   }
-  if (legacy.length > 0 && !quiet && !opts.nestedSync) {
+  if (legacy.length > 0 && !quiet) {
     console.log();
     console.log(
       kleur.yellow(
         `! ${legacy.length} sprite${legacy.length === 1 ? '' : 's'} came from a legacy single-image file — skipped.`,
       ),
     );
-    console.log(kleur.dim(`  Fix: open the file in MagicPixel and save it once, then re-run \`${cmd('sync')}\`.`));
+    console.log(ui.fixText(`open the file in MagicPixel and save it once, then re-run \`${cmd('sync')}\`.`));
   }
 
-  if (flattenBlocked.length > 0 && !quiet && !opts.nestedSync) {
+  if (flattenBlocked.length > 0 && !quiet) {
     console.log();
     console.log(
       kleur.yellow(
@@ -230,15 +262,16 @@ export async function runPushWith(
     for (const a of flattenBlocked.slice(0, 10)) {
       console.log(kleur.dim(`    ${a.key} (${'layers' in a ? a.layers : '?'} layers)`));
     }
-    console.log(kleur.dim('  Fix: re-run with --flatten to replace them with the flat disk image.'));
+    console.log(ui.fixText('re-run with --flatten to replace them with the flat disk image.'));
   }
 
   if (sendable.length === 0) {
     await persistDiskFingerprints(state, candidates);
-    if (!quiet) console.log(kleur.green('✓ nothing to push.'));
+    if (!quiet) console.log(ui.ok('nothing to push.'));
     return {
       ...empty, imported: matched.entries.length, unchanged: skipped,
       keptAssetIds: collectKeptAssetIds(candidates, state.synced ?? {}, []), scanned: candidates.length,
+      issues: preIssues, needsFlatten: flattenBlocked.map((a) => a.key), gameIndex: index,
     };
   }
 
@@ -254,6 +287,7 @@ export async function runPushWith(
     return {
       ...empty, imported: matched.entries.length,
       keptAssetIds: collectKeptAssetIds(candidates, state.synced ?? {}, []), scanned: candidates.length,
+      issues: preIssues, needsFlatten: flattenBlocked.map((a) => a.key), gameIndex: index,
     };
   }
 
@@ -287,7 +321,8 @@ export async function runPushWith(
     }
   }
 
-  const progress = quiet ? null : ora(`Pushing 0/${sprites.length}…`).start();
+  const progress = quiet ? null : makeSpinner(`Uploading  ${progressBar(0, sprites.length)}`).start();
+  opts.onStatus?.(`${icon('up')} Uploading ${sprites.length.toLocaleString('en-US')} sprite${sprites.length === 1 ? '' : 's'}…`);
   const results: PushResult[] = [];
   let synced: Record<string, SyncedSprite> = { ...(state.synced ?? {}) };
   try {
@@ -305,7 +340,9 @@ export async function runPushWith(
         outDir: config.outDir,
       });
       await saveState({ ...state, synced });
-      if (progress) progress.text = `Pushing ${Math.min(i + batch.length, sprites.length)}/${sprites.length}…`;
+      const doneN = Math.min(i + batch.length, sprites.length);
+      if (progress) progress.text = `Uploading  ${progressBar(doneN, sprites.length)}  ${kleur.dim(batch[batch.length - 1]?.name ?? '')}`;
+      else opts.onStatus?.(`${icon('up')} Uploading ${doneN}/${sprites.length} ${batch[batch.length - 1]?.name ?? ''}…`);
     }
   } catch (e) {
     progress?.fail(`Push stopped after ${results.length}/${sprites.length}. ${(e as Error).message}`);
@@ -362,9 +399,9 @@ export async function runPushWith(
     let printedIssues = 0;
     for (const r of results) {
       if (r.status === 'conflict') {
-        if (printedIssues++ < 10) console.log(`  ${kleur.yellow('!')} ${r.key}: ${opts.force && r.lastWriteSource === 'editor' && !opts.overwriteEditorChanges ? `edited in MagicPixel — skipped. Add --overwrite-editor-changes to replace it.` : conflictHint(r.reason)}`);
+        if (printedIssues++ < 10) console.log(`  ${icon('warn')} ${r.key}: ${opts.force && r.lastWriteSource === 'editor' && !opts.overwriteEditorChanges ? `edited in MagicPixel — skipped. Add --overwrite-editor-changes to replace it.` : conflictHint(r.reason)}`);
       } else if (r.status === 'error') {
-        if (printedIssues++ < 10) console.log(`  ${kleur.red('!')} ${r.key}: ${r.message ?? 'push failed'}`);
+        if (printedIssues++ < 10) console.log(`  ${icon('fail')} ${r.key}: ${r.message ?? 'push failed'}`);
       }
     }
     if (printedIssues > 10) console.log(kleur.dim(`  …and ${printedIssues - 10} more`));
@@ -378,9 +415,23 @@ export async function runPushWith(
     }
   }
   if (failed) process.exitCode = 1;
+  const issues = [...preIssues];
+  for (const r of results) {
+    if (r.status === 'conflict') {
+      issues.push({
+        key: r.key,
+        text: opts.force && r.lastWriteSource === 'editor' && !opts.overwriteEditorChanges
+          ? 'edited in MagicPixel — skipped. Add --overwrite-editor-changes to replace it.'
+          : conflictHint(r.reason),
+      });
+    } else if (r.status === 'error') {
+      issues.push({ key: r.key, text: r.message ?? 'push failed' });
+    }
+  }
   return {
     ...counts, imported: matched.entries.length,
     keptAssetIds: collectKeptAssetIds(candidates, synced, results), scanned: candidates.length,
+    issues, needsFlatten: flattenBlocked.map((a) => a.key),
   };
 }
 

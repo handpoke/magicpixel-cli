@@ -1,9 +1,10 @@
 import kleur from 'kleur';
+import { icon, ui } from '../util/ui.js';
 import { existsSync } from 'node:fs';
 import { rename } from 'node:fs/promises';
 import { resolve, relative } from 'node:path';
-import { createInterface } from 'node:readline/promises';
-import { stdin, stdout } from 'node:process';
+import { confirm as askYesNo } from '../util/prompt.js';
+import { stdin } from 'node:process';
 
 import { loadConfig, statePath, getApiKey } from '../config.js';
 import { assertKeyValid } from '../util/auth.js';
@@ -41,14 +42,14 @@ export async function repairCommand(opts: RepairOpts = {}): Promise<void> {
   try {
     const key = getApiKey();
     await assertKeyValid(key, config);
-    console.log(`     ${kleur.green('✓')} key accepted`);
+    console.log(`     ${icon('ok')} key accepted`);
   } catch (e) {
     // Preserve multi-line "Fix:" guidance from getApiKey()/assertKeyValid —
     // truncating to the first line strips the exact instructions a
     // first-time `repair` user needs.
     const msg = (e as Error).message ?? String(e);
     const [head, ...rest] = msg.split('\n');
-    console.log(`     ${kleur.red('✗')} ${head}`);
+    console.log(`     ${icon('fail')} ${head}`);
     for (const line of rest) console.log(`     ${line}`);
     process.exitCode = 1;
     return;
@@ -83,9 +84,9 @@ export async function repairCommand(opts: RepairOpts = {}): Promise<void> {
       const dest = `${sPath}.repair-${Date.now()}`;
       try {
         await rename(sPath, dest);
-        console.log(`     ${kleur.green('✓')} moved to ${relative(process.cwd(), dest)}`);
+        console.log(`     ${icon('ok')} moved to ${relative(process.cwd(), dest)}`);
       } catch (e) {
-        console.log(`     ${kleur.red('✗')} ${(e as Error).message}`);
+        console.log(`     ${icon('fail')} ${(e as Error).message}`);
         process.exitCode = 1;
         return;
       }
@@ -112,7 +113,7 @@ export async function repairCommand(opts: RepairOpts = {}): Promise<void> {
     }
   } else {
     await pruneEmptyDirs(outRoot);
-    console.log(`     ${kleur.green('✓')} done`);
+    console.log(`     ${icon('ok')} done`);
   }
 
   // --- Step 4: full sync ---------------------------------------------------
@@ -124,9 +125,9 @@ export async function repairCommand(opts: RepairOpts = {}): Promise<void> {
     console.log(`     ${kleur.dim(`would run \`${cmd('sync')} --full\` (skipped in --dry-run)`)}`);
     console.log();
     if (skippedStep2) {
-      console.log(kleur.yellow('! repair plan would skip the state reset. Re-run with --yes to apply it.'));
+      console.log(ui.warn('repair plan would skip the state reset. Re-run with --yes to apply it.'));
     } else {
-      console.log(kleur.green('✓ repair plan looks good. Re-run without --dry-run to apply.'));
+      console.log(ui.ok('repair plan looks good. Re-run without --dry-run to apply.'));
     }
     return;
   }
@@ -141,20 +142,11 @@ export async function repairCommand(opts: RepairOpts = {}): Promise<void> {
   console.log();
   if ((process.exitCode ?? 0) > exitBefore) {
     console.log(
-      kleur.yellow(`! repair completed with errors — re-run \`${cmd('sync')}\` to retry the failed downloads.`),
+      ui.warn(`repair completed with errors — re-run \`${cmd('sync')}\` to retry the failed downloads.`),
     );
   } else {
-    console.log(kleur.green('✓ repair complete.'));
+    console.log(ui.ok('repair complete.'));
   }
 }
 
-async function confirm(prompt: string): Promise<boolean> {
-  if (!stdin.isTTY) return false;  // CI/non-interactive: default to NO; require --yes.
-  const rl = createInterface({ input: stdin, output: stdout });
-  try {
-    const answer = (await rl.question(`     ${prompt}`)).trim().toLowerCase();
-    return answer === 'y' || answer === 'yes';
-  } finally {
-    rl.close();
-  }
-}
+const confirm = (prompt: string) => askYesNo(`     ${prompt}`);

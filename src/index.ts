@@ -17,6 +17,11 @@ import { startCommand } from './commands/start.js';
 import { connectCommand } from './commands/connect.js';
 import { resyncCommand } from './commands/resync.js';
 import { searchCommand } from './commands/search.js';
+import { whyCommand } from './commands/why.js';
+import { consolidateCommand } from './commands/consolidate.js';
+import { findWorkspaceRoot, resolveInvokedPath } from './util/workspace.js';
+import { errorCard, setPlain } from './util/ui.js';
+import { cleanStraysCommand } from './commands/cleanStrays.js';
 import { parseWatchInterval, parseConcurrency } from './util/flagValidators.js';
 import { CLI_VERSION } from './version.js';
 import { cmd } from './util/invoke.js';
@@ -26,6 +31,27 @@ const major = Number(process.versions.node.split('.')[0]);
 if (major < 18) {
   console.error(kleur.red(`magicpixel requires Node.js >= 18 (you have ${process.versions.node}).`));
   process.exit(1);
+}
+
+// A monorepo has one setup at its root. Run from any game folder inside it,
+// every command uses that setup, so a second one is never created.
+{
+  const wsRoot = findWorkspaceRoot(process.cwd());
+  if (wsRoot) {
+    process.stderr.write(kleur.dim(`Using the MagicPixel setup in ${wsRoot}\n`));
+    // Paths typed by the user stay relative to where they ran the command.
+    process.env.MAGICPIXEL_INVOKED_FROM = process.cwd();
+    process.chdir(wsRoot);
+  }
+}
+
+// `--plain` anywhere: no colors, emoji or redraws (also NO_COLOR, CI, pipes).
+{
+  const i = process.argv.indexOf('--plain');
+  if (i > 1) {
+    process.argv.splice(i, 1);
+    setPlain(true);
+  }
 }
 
 const program = new Command();
@@ -44,7 +70,7 @@ const wrap =
       const err = e as Error;
       const msg = err.message ?? String(e);
       // Multi-line messages are already formatted with "Fix:" hints — print as-is.
-      console.error(kleur.red(msg));
+      console.error(errorCard(msg));
       // Fire-and-forget telemetry → exit 1. `reportAndExit` decides whether
       // the error is worth surfacing on /admin/errors (5xx ApiErrors +
       // unexpected throws); user-fixable errors are filtered out inside
@@ -117,7 +143,8 @@ program
           `  Fix: ${cmd(`sync --only ${extra[0].replace(/^\/+/, '')}`)}`,
       );
     }
-    return syncCommand(opts as Parameters<typeof syncCommand>[0]);
+    const o = opts as Parameters<typeof syncCommand>[0];
+    return syncCommand(o.only ? { ...o, only: o.only.map((f) => resolveInvokedPath(f)) } : o);
   }));
 
 program
@@ -136,13 +163,13 @@ program
   .option('-y, --yes', 'Skip the confirmation question')
   .option('--dry-run', 'Show what would change without sending anything')
   .addHelpText('after', '\nExamples:\n  $ magicpixel resync Sprites/Enemies --dry-run\n  $ magicpixel resync Sprites/Enemies\n')
-  .action(wrap("resync", async (folder: string, opts) => resyncCommand(folder, opts as Parameters<typeof resyncCommand>[1])));
+  .action(wrap("resync", async (folder: string, opts) => resyncCommand(resolveInvokedPath(folder), opts as Parameters<typeof resyncCommand>[1])));
 
 program
   .command('connect <glob>')
   .description('Limit which game folders sync (default is all sprites)')
   .addHelpText('after', '\nExamples:\n  $ magicpixel connect \'assets/Sprites/Hero/**\'\n  $ magicpixel connect Runtime/UI/hud.png\n')
-  .action(wrap("connect", async (glob: string) => connectCommand(glob)));
+  .action(wrap("connect", async (glob: string) => connectCommand(resolveInvokedPath(glob))));
 
 program
   .command('search <query>')
@@ -176,5 +203,25 @@ program
   .command('whoami')
   .description('Verify the API key and show what it can see')
   .action(wrap("whoami", async () => whoamiCommand()));
+
+program
+  .command('why <path>')
+  .description('Explain what the next sync does with the game PNGs under a path')
+  .addHelpText('after', '\nExamples:\n  $ magicpixel why .SpineRaw/rabbit\n  $ magicpixel why Assets/Sprites/hero.png\n')
+  .action(wrap("why", async (path: string) => whyCommand(path)));
+
+program
+  .command('consolidate')
+  .description('Merge the MagicPixel setups of several game folders into one at this (monorepo) folder')
+  .option('-y, --yes', 'Skip the confirmation question')
+  .option('--dry-run', 'Show what would change without changing anything')
+  .action(wrap("consolidate", async (opts) => { await consolidateCommand(opts as { yes?: boolean; dryRun?: boolean }); }));
+
+program
+  .command('clean-strays')
+  .description('Delete copies sync wrote into outDir for sprites that belong to another game folder')
+  .option('-y, --yes', 'Skip the confirmation question')
+  .option('--dry-run', 'List the copies without deleting anything')
+  .action(wrap("clean-strays", async (opts) => cleanStraysCommand(opts as { yes?: boolean; dryRun?: boolean })));
 
 program.parseAsync(process.argv);

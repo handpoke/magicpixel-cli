@@ -5,6 +5,47 @@ All notable changes to `@magicpixelart/cli` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] - 2026-10-10
+
+### Changed
+- Friendlier terminal: one set of icons and colors everywhere (✅ done, ⚠️ needs attention, ❌ failed, 💡 fix), numbered setup steps, a summary card after each sync, and progress bars with counts and percent.
+- `sync --watch` opens with a header card, shows ⬇️ pulled / ⬆️ sent / 🗑 removed lines, and a live "all in sync" status.
+- Errors show what happened with the fix command highlighted underneath.
+- Dry runs show a clear "Preview only — nothing changed" banner.
+- `start` numbers its steps (`1/3 · Your MagicPixel account`).
+- Checking and uploading show progress bars with the current file; the watch status line follows along (`⬆️ Uploading 4/12 body_front…`).
+- A paused watcher (offline, key or daily allowance) shows a yellow "Paused · retrying in 30s" status.
+- Errors print as a red card with the fix underneath; long lines wrap instead of being cut.
+
+### Added
+- `--plain` (also `NO_COLOR`, `MAGICPIXEL_PLAIN=1`, `CI`, `TERM=dumb`, or piped output): no colors, emoji, boxes, spinners or redraws. Errors check the error stream, so `2>errors.log` stays plain.
+
+## [0.6.0] - 2026-10-10
+
+### Added
+- Monorepo support: one `magicpixel.json` at the root (`"workspace": true`, `"members": [...]`) syncs every game folder inside it. Sprite names stay exactly as they were per folder, so nothing re-uploads.
+- `magicpixel consolidate [--dry-run] [-y]` (also run by `start` at the root) merges each game folder's old setup into one: settings and sync history are combined, `exclude`/`connect` rules re-anchored to their folder, the login key moved, old files backed up to `.magicpixel/backup/`, and stray copies of game files deleted.
+- Any command run inside a game folder of a monorepo uses the root setup, so a second one is never created. `start` inside one game folder offers to set up at the root instead.
+- New art in a game folder's library folder (e.g. a variant saved as a new file) is written next to its sibling files, in their naming style, instead of into `outDir`.
+- `start` offers to replace multi-layer MagicPixel artboards with your local files instead of skipping them.
+- Folder names typed inside a game folder (`sync --only`, `connect`, `resync`, `why`) mean that game folder, e.g. `Runtime` typed in `kr-core` is `kr-core/Runtime`.
+
+### Fixed
+- Re-running `consolidate` on a merged setup changes nothing.
+- Merge cleanup only removes empty folders and orphan `.meta` files; your own files in old output folders stay.
+
+## [0.5.39] - 2026-10-10
+
+### Fixed
+- `sync` never writes stray copies of game sprites into `outDir`. Sprites in Connected folders are written only to their real game file or beside sibling files this folder owns; the rest are skipped with one message. Works even if the owning folder never synced on this machine. `--here` still downloads copies.
+- `sync --watch` status lines fit the terminal width (no more wrapped, stacked lines), and only redraw on a live terminal.
+- `sync --watch` rescans the game tree every 5 minutes instead of every 30 seconds; edits to known files are still picked up every tick.
+- `sync --watch` now prints uploads ("Sent N edited sprites") and every sprite it could not send, with the reason (exclude rule, multi-layer artboard, legacy file, conflict). The header names any `exclude` rule that skips files.
+
+### Added
+- `magicpixel why <path>` — explains what the next sync does with each PNG under a path.
+- `magicpixel clean-strays` — removes copies a past sync wrote for sprites that belong to another game folder.
+
 ## [0.5.38] - 2026-10-10
 
 ### Fixed
