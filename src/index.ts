@@ -25,6 +25,7 @@ import { cleanStraysCommand } from './commands/cleanStrays.js';
 import { parseWatchInterval, parseConcurrency } from './util/flagValidators.js';
 import { CLI_VERSION } from './version.js';
 import { cmd } from './util/invoke.js';
+import { formatHelpTips } from './util/commandTips.js';
 
 // Node version guard
 const major = Number(process.versions.node.split('.')[0]);
@@ -59,7 +60,8 @@ const program = new Command();
 program
   .name('magicpixel')
   .description('Sync MagicPixel pixel-art assets to your local project')
-  .version(CLI_VERSION);
+  .version(CLI_VERSION)
+  .addHelpText('after', formatHelpTips());
 
 const wrap =
   <T extends unknown[]>(commandName: string, fn: (...a: T) => Promise<void>) =>

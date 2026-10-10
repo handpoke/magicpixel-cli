@@ -8,12 +8,12 @@
  */
 
 import kleur from 'kleur';
-import { icon, progressBar, spinner as makeSpinner, ui } from '../util/ui.js';
+import { icon, progressBar, shortenPath, spinner as makeSpinner, ui, visibleWidth } from '../util/ui.js';
 import { mkdir, readFile, rename } from 'node:fs/promises';
 import { dirname, relative, resolve } from 'node:path';
 
 import { loadConfig, loadState, saveState, resetStateIfProjectChanged, PROJECT_CHANGED_MESSAGE, type MagicPixelConfig, type SyncState, type SyncedSprite } from '../config.js';
-import { ensureEngineConnect } from '../util/engineConnect.js';
+import { ensureEngineConnect, unwatchedHiddenFolders } from '../util/engineConnect.js';
 import { PUSH_BATCH_SIZE, pushSpritesAdaptive, fetchManifestPage, getLastProjectInfo, type PushResult, type PushSprite } from '../api.js';
 import { hashFile } from '../util/hash.js';
 import { createLimit } from '../util/limit.js';
@@ -141,6 +141,13 @@ export async function runPushWith(
       : { files: [] });
   const matched = matchConnectGlobs(index, config.connect ?? [], config.exclude);
   const sourceByKey = collectSourceRelMap(matched.entries, state.synced);
+  if (!quiet) {
+    const watched = new Set(matched.entries.map((e) => e.key));
+    for (const [folder, n] of unwatchedHiddenFolders(index.files, watched, config.exclude ?? []).slice(0, 5)) {
+      console.log(ui.warn(`${n.toLocaleString('en-US')} PNGs in ${folder} aren't watched.`));
+      console.log(ui.fix(`${cmd('connect')} '${folder}/**'`));
+    }
+  }
 
   const disk = await walkOutDirPngs(config.outDir);
   const absByKey = new Map(disk.map((a) => [a.key, a.abs]));
@@ -341,8 +348,12 @@ export async function runPushWith(
       });
       await saveState({ ...state, synced });
       const doneN = Math.min(i + batch.length, sprites.length);
-      if (progress) progress.text = `Uploading  ${progressBar(doneN, sprites.length)}  ${kleur.dim(batch[batch.length - 1]?.name ?? '')}`;
-      else opts.onStatus?.(`${icon('up')} Uploading ${doneN}/${sprites.length} ${batch[batch.length - 1]?.name ?? ''}…`);
+      const last = batch[batch.length - 1];
+      const where = last ? fpByKey.get(last.key)?.sourceRel ?? last.key : '';
+      if (progress) {
+        const head = `Uploading  ${progressBar(doneN, sprites.length)}  `;
+        progress.text = head + kleur.dim(shortenPath(where, (process.stdout.columns ?? 80) - visibleWidth(head) - 4));
+      } else opts.onStatus?.(`${icon('up')} Uploading ${doneN}/${sprites.length} ${shortenPath(where, 60)}…`);
     }
   } catch (e) {
     progress?.fail(`Push stopped after ${results.length}/${sprites.length}. ${(e as Error).message}`);

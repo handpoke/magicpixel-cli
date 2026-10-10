@@ -80,6 +80,24 @@ export function visibleWidth(s: string): number {
 }
 
 /** Cut a plain line to `max` visible columns. */
+/**
+ * Path that fits in `max` columns, keeping the end (the file and its parent
+ * folders) and dropping leading folders: `…/rabbit/agni/ear_left_front.png`.
+ */
+export function shortenPath(path: string, max: number): string {
+  const p = path.replace(/\.png$/i, '');
+  const limit = Math.max(12, max);
+  if (p.length <= limit) return p;
+  const parts = p.split('/');
+  let out = parts[parts.length - 1]!;
+  for (let i = parts.length - 2; i >= 0; i--) {
+    const next = `${parts[i]}/${out}`;
+    if (next.length + 2 > limit) break;
+    out = next;
+  }
+  return out.length + 2 <= limit ? `…/${out}` : `…${out.slice(-(limit - 1))}`;
+}
+
 export function fitLine(line: string, columns: number | undefined): string {
   const max = Math.max(20, (columns ?? 80) - 1);
   if (visibleWidth(line) <= max) return line;

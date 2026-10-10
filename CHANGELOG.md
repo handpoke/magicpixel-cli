@@ -5,6 +5,18 @@ All notable changes to `@magicpixelart/cli` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.2] - 2026-10-10
+
+### Fixed
+- Merging setups cleans folder patterns (`//`, stray `~`, duplicates, ones a broader folder covers).
+- `connect` cleans typed patterns and rejects empty ones.
+- Sync warns when a hidden art folder (e.g. `.SpineRaw/rabbit`) has PNGs nothing watches, with the exact `connect` command.
+- `why` lists watched patterns once and prints a ready-to-run `connect` command.
+
+### Added
+- Upload progress shows the file's folder path (e.g. `…/rabbit/agni/ear_left_front`), not just its name.
+- "Useful commands" after `start`, "Common tasks" in `--help`, and a short hint after `sync`, all from one shared list.
+
 ## [0.6.1] - 2026-10-10
 
 ### Changed

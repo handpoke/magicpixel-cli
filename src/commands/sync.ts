@@ -1,5 +1,5 @@
 import kleur from 'kleur';
-import { canRedraw, card, fitLine, formatDuration, icon, progressBar, spinner as makeSpinner, ui } from '../util/ui.js';
+import { canRedraw, card, isPlain, fitLine, formatDuration, icon, progressBar, spinner as makeSpinner, ui } from '../util/ui.js';
 import type { Ora } from 'ora';
 import { mkdir, unlink, readdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -35,6 +35,7 @@ import { runResync } from './resync.js';
 import { keyInScope, pathInScope, resolveSyncScope, scopeFingerprint } from '../util/syncScope.js';
 import { findForeignOwner, foreignOwnerMessage, recordProjectRoot } from '../util/projectRoots.js';
 import { placeBesideSiblings, splitStrayDownloads, straySkipMessage } from '../util/strayGuard.js';
+import { syncFooterHint } from '../util/commandTips.js';
 
 /** How often the watcher asks for a library "Resync from game" request. */
 const RESYNC_POLL_MS = 15_000;
@@ -1687,6 +1688,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     );
     printChanges(result, '  ', { includeRenames: renamed.length === 0 });
     if (renamed.length > 0) printRenames(renamed, { withHints: true });
+    if (!runOpts.watchMode && !isPlain()) console.log(kleur.dim(syncFooterHint()));
   }
 
   if (result.failed) process.exitCode = 1;

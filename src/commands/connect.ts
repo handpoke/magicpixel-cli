@@ -4,7 +4,7 @@ import { loadConfig, saveConfig } from '../config.js';
 import { assertSafeGlob } from '../util/security.js';
 import { detectProjectKind, isEngineKind } from '../util/framework.js';
 import { describeExcluded, indexGamePngs, matchConnectGlobs, countingSpritesText } from '../util/gameScan.js';
-import { isAllSpritesGlob, nextConnectGlobs } from '../util/engineConnect.js';
+import { isAllSpritesGlob, nextConnectGlobs, normalizeConnectGlob, tidyConnectGlobs } from '../util/engineConnect.js';
 import { cmd } from '../util/invoke.js';
 import { runPush } from './push.js';
 
@@ -19,15 +19,17 @@ export function describeWorkingSet(glob: string): string {
  * the original files — not a copy under outDir.
  */
 export async function connectCommand(glob: string): Promise<void> {
-  const pattern = assertSafeGlob(glob);
+  const pattern = normalizeConnectGlob(assertSafeGlob(glob));
+  if (!pattern) throw new Error(`"${glob}" isn't a folder pattern. Example: ${cmd('connect')} 'Assets/Sprites/**'`);
   const config = await loadConfig();
-  const next = nextConnectGlobs(config.connect, pattern);
+  const next = tidyConnectGlobs(nextConnectGlobs(config.connect.map(normalizeConnectGlob), pattern));
   const changed =
     next.length !== config.connect.length || next.some((g, i) => g !== config.connect[i]);
   if (changed) {
+    const added = !config.connect.map(normalizeConnectGlob).includes(pattern);
     config.connect = next;
     await saveConfig(config);
-    console.log(ui.ok(`now syncing ${describeWorkingSet(pattern)}`));
+    console.log(ui.ok(added ? `now syncing ${describeWorkingSet(pattern)}` : 'tidied your folder patterns'));
   }
 
   const kind = await detectProjectKind();

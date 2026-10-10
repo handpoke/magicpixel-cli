@@ -102,6 +102,8 @@ No bundler config, no runtime, no extra package.
 
 ## Commands
 
+Run `magicpixel --help` for a short "Common tasks" list. A folder isn't syncing? `magicpixel why <folder>` prints the `connect` command that fixes it.
+
 | Command | What it does |
 | --- | --- |
 | `start [--force]` | One-command bootstrap. Init + login + first sync. The only command to tell new users to run. |

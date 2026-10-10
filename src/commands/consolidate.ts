@@ -13,6 +13,7 @@ import { readCredentialsSync, writeCredentials } from '../util/credentials.js';
 import { indexGamePngs } from '../util/gameScan.js';
 import { walkOutDirPngs } from '../util/paths.js';
 import { anchorGlob, detectWorkspaceMembers } from '../util/workspace.js';
+import { normalizeConnectGlob, tidyConnectGlobs } from '../util/engineConnect.js';
 import { detectEngineKind, readWorkspaceMembers } from '../util/framework.js';
 import { cmd } from '../util/invoke.js';
 import { ensureGitignore } from './init.js';
@@ -50,9 +51,9 @@ export function mergeSetups(members: string[], children: ChildSetup[]): MergedSe
   const configured = children.filter((c) => c.config);
   const first = configured[0]?.config ?? {};
   const uniq = (xs: string[]) => [...new Set(xs)];
-  const connect = uniq(configured.flatMap((c) => {
+  const connect = tidyConnectGlobs(configured.flatMap((c) => {
     const globs = c.config!.connect?.length ? c.config!.connect : ['**'];
-    return globs.map((g) => anchorGlob(c.member, g));
+    return globs.map((g) => anchorGlob(c.member, normalizeConnectGlob(g)));
   }));
   const exclude = uniq(configured.flatMap((c) => (c.config!.exclude ?? []).map((g) => anchorGlob(c.member, g))));
   const include = uniq(configured.flatMap((c) => c.config!.include ?? defaultConfig.include));
@@ -183,7 +184,7 @@ export async function consolidateCommand(opts: { yes?: boolean; dryRun?: boolean
     if (current) {
       merged.config = {
         ...current,
-        connect: [...new Set([...(current.connect ?? []), ...merged.config.connect])],
+        connect: tidyConnectGlobs([...(current.connect ?? []), ...merged.config.connect]),
         exclude: [...new Set([...(current.exclude ?? []), ...merged.config.exclude])],
       };
     }

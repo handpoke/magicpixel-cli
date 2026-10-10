@@ -29,6 +29,7 @@ import { ApiError } from '../api.js';
 import { connectCommand } from './connect.js';
 import { isAllSpritesGlob } from '../util/engineConnect.js';
 import type { MagicPixelConfig } from '../config.js';
+import { COMMAND_TIPS, formatTipsBlock } from '../util/commandTips.js';
 
 interface StartOpts {
   force?: boolean;
@@ -230,6 +231,8 @@ export async function startCommand(opts: StartOpts = {}): Promise<void> {
   }
   console.log();
   console.log(kleur.dim('  Game sprites write back to their original path. New MagicPixel art lands in outDir.'));
+  console.log();
+  console.log(formatTipsBlock(COMMAND_TIPS.slice(1)));
   console.log();
   if (await hasDevScript()) {
     const watchCmd = hasWatch ? 'npm run magicpixel:watch' : `${cmd('sync')} --watch`;

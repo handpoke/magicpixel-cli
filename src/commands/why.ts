@@ -1,5 +1,5 @@
 import kleur from 'kleur';
-import { spinner as makeSpinner } from '../util/ui.js';
+import { spinner as makeSpinner, ui } from '../util/ui.js';
 import { loadConfig, loadState, type MagicPixelConfig, type SyncedSprite } from '../config.js';
 import { detectProjectKind, isEngineKind } from '../util/framework.js';
 import { countingSpritesText, entryMatchesGlob, indexGamePngs, rootSpriteDotDirs, type GameIndexEntry } from '../util/gameScan.js';
@@ -37,10 +37,10 @@ export function explainSprite(
   return { kind: 'changed', ...(typeof known.layers === 'number' ? { layers: known.layers } : {}) };
 }
 
-export function describeVerdict(v: WhyVerdict, config: Pick<MagicPixelConfig, 'connect'>): string {
+export function describeVerdict(v: WhyVerdict): string {
   switch (v.kind) {
     case 'not-watched':
-      return `not watched — no "connect" pattern matches it (${(config.connect ?? []).join(', ') || 'none'}). Fix: ${cmd('connect')} '<folder>/**'`;
+      return 'not watched — no folder pattern covers it';
     case 'excluded':
       return `skipped by exclude rule "${v.rule}" — remove it from "exclude" in magicpixel.json to sync this file`;
     case 'new':
@@ -84,9 +84,12 @@ export async function whyCommand(pathArg: string): Promise<void> {
   const synced = state.synced ?? {};
   const counts = new Map<string, number>();
   const lines: string[] = [];
+  let unwatched = 0;
   for (const e of files) {
     const sha = (await hashFile(e.abs))?.sha256 ?? null;
-    const text = describeVerdict(explainSprite(e, config, synced, sha), config);
+    const verdict = explainSprite(e, config, synced, sha);
+    if (verdict.kind === 'not-watched') unwatched++;
+    const text = describeVerdict(verdict);
     counts.set(text, (counts.get(text) ?? 0) + 1);
     if (lines.length < 20) lines.push(`  ${e.sourceRel}\n    ${kleur.dim('→')} ${text}`);
   }
@@ -97,4 +100,15 @@ export async function whyCommand(pathArg: string): Promise<void> {
   console.log();
   console.log(lines.join('\n'));
   if (files.length > lines.length) console.log(kleur.dim(`  …and ${files.length - lines.length} more`));
+  if (unwatched > 0) {
+    console.log();
+    console.log(kleur.dim(`  Watching: ${(config.connect ?? []).join(', ') || 'nothing'}`));
+    console.log(ui.fix(whyConnectCommand(files[0]!.sourceRel, target), '  '));
+  }
+}
+
+/** Ready-to-run connect command for the folder the user asked about. */
+export function whyConnectCommand(firstRel: string, target: string): string {
+  const folder = firstRel.toLowerCase() === target ? firstRel.split('/').slice(0, -1).join('/') : firstRel.slice(0, target.length);
+  return `${cmd('connect')} '${folder ? `${folder}/**` : '**'}'`;
 }

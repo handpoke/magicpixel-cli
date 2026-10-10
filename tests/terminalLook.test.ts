@@ -103,3 +103,14 @@ describe('terminal look', () => {
     }
   });
 });
+
+import { shortenPath } from '../src/util/ui.js';
+describe('upload progress path', () => {
+  const rel = 'kr-remote-bundles/.SpineRaw/rabbit/agni/ear_left_front.png';
+  it('shows the whole path when it fits', () => {
+    expect(shortenPath(rel, 100)).toBe('kr-remote-bundles/.SpineRaw/rabbit/agni/ear_left_front');
+  });
+  it('keeps the asset folder when space is tight', () => {
+    expect(shortenPath(rel, 32)).toBe('…/rabbit/agni/ear_left_front');
+  });
+});
