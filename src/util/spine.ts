@@ -29,7 +29,6 @@ export const MAX_RIGS_PER_REQUEST = 10;
 /** Bytes read to decide whether a .json is a skeleton export. */
 const HEAD_BYTES = 300;
 /** Stop after this many skeletons; a game with more is not what this is for. */
-const MAX_SKELETONS = 200;
 /** A folder is a skin folder when at least this share of its PNGs are rig images. */
 const SKIN_SHARE = 0.5;
 /** Base folder / view grouping need at least this share of the rig's images. */
@@ -135,9 +134,10 @@ export interface SkeletonFile {
   abs: string;
   /** Path relative to the setup folder, for messages. */
   rel: string;
-  /** Raw file text (sent as-is so the hash matches what's uploaded). */
-  text: string;
-  json: unknown;
+  /** sha256 of the file; the JSON itself is read again only for rigs being uploaded. */
+  sha256: string;
+  /** File size in bytes, for request batching. */
+  size: number;
   spineVersion: string;
   images: string[];
 }
@@ -202,7 +202,6 @@ export async function findSkeletonFiles(
   const skeletons: SkeletonFile[] = [];
   const skipped: FindSkeletonsResult['skipped'] = [];
   await Promise.all(candidates.map((abs) => io(async () => {
-    if (skeletons.length >= MAX_SKELETONS) return;
     const rel = relative(base, abs).replace(/\\/g, '/');
     try {
       if (!looksLikeSkeleton(await readHead(abs))) return;
@@ -215,7 +214,8 @@ export async function findSkeletonFiles(
       const json: unknown = JSON.parse(text);
       const info = readSkeletonImages(json);
       if (!info) return;
-      skeletons.push({ abs, rel, text, json, ...info });
+      // Keep only what matching needs: a big game has hundreds of exports.
+      skeletons.push({ abs, rel, sha256: createHash('sha256').update(text).digest('hex'), size, ...info });
     } catch {
       /* not JSON after all / unreadable — not a skeleton we can use */
     }
@@ -308,54 +308,33 @@ export interface DetectedRig {
   hash: string;
 }
 
-/** Groups skeletons in one directory into rigs (views of the same character). */
-export function groupSkeletons(
-  skeletons: readonly SkeletonFile[],
-  folders: ReadonlyMap<string, FolderInfo>,
-): SkeletonFile[][] {
-  const byDir = new Map<string, SkeletonFile[]>();
-  for (const s of skeletons) {
-    const d = dirname(s.abs);
-    byDir.set(d, [...(byDir.get(d) ?? []), s]);
-  }
-  const groups: SkeletonFile[][] = [];
-  for (const files of byDir.values()) {
-    const keys = files.map((f) => new Set(f.images.map(imageKey)));
-    const parent = files.map((_, i) => i);
-    const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
-    for (let i = 0; i < files.length; i++) {
-      for (let j = i + 1; j < files.length; j++) {
-        if (sameRig(keys[i], keys[j], folders)) parent[find(i)] = find(j);
-      }
-    }
-    const byRoot = new Map<number, SkeletonFile[]>();
-    files.forEach((f, i) => byRoot.set(find(i), [...(byRoot.get(find(i)) ?? []), f]));
-    groups.push(...byRoot.values());
-  }
-  return groups;
-}
+/** Camera-facing suffixes that mark one view of a character (`rabbit_front.json`). */
+const VIEW_SUFFIX = /[_-](front|side|back|north|south|east|west|left|right|up|down)$/i;
 
 /**
- * Two skeletons are views of one rig when their images overlap heavily, or
- * when one synced folder holds most of both (views whose parts are named per
- * view, `head_front` / `head_side`, still share every skin folder).
+ * Groups skeletons into rigs. Only files in one directory whose names differ
+ * by a view suffix (`rabbit_front`, `rabbit_side`, `rabbit_back`) are views of
+ * one character; every other export is a rig of its own, even when it shares
+ * a folder or part names with others (a `Spine/` folder of unrelated props).
  */
-function sameRig(a: ReadonlySet<string>, b: ReadonlySet<string>, folders: ReadonlyMap<string, FolderInfo>): boolean {
-  if (a.size === 0 || b.size === 0) return false;
-  if (countIn(a, b) >= COVER_SHARE * Math.min(a.size, b.size)) return true;
-  for (const f of folders.values()) {
-    if (countIn(f.pngs, a) >= COVER_SHARE * a.size && countIn(f.pngs, b) >= COVER_SHARE * b.size) return true;
+export function groupSkeletons(skeletons: readonly SkeletonFile[]): SkeletonFile[][] {
+  const groups = new Map<string, SkeletonFile[]>();
+  for (const s of skeletons) {
+    const stem = basename(s.abs).replace(/\.json$/i, '');
+    const character = stem.replace(VIEW_SUFFIX, '');
+    const key = character !== stem ? `${dirname(s.abs)}\0${character.toLowerCase()}` : s.abs;
+    groups.set(key, [...(groups.get(key) ?? []), s]);
   }
-  return false;
+  return [...groups.values()];
 }
 
-export function rigHash(rig: Pick<DetectedRig, 'name' | 'folderPath' | 'baseFolderPath'> & { views: { name: string; text: string }[] }): string {
+export function rigHash(rig: Pick<DetectedRig, 'name' | 'folderPath' | 'baseFolderPath'> & { views: { name: string; sha256: string }[] }): string {
   const h = createHash('sha256');
   h.update(JSON.stringify({
     name: rig.name,
     folderPath: rig.folderPath,
     baseFolderPath: rig.baseFolderPath,
-    views: rig.views.map((v) => [v.name, createHash('sha256').update(v.text).digest('hex')]),
+    views: rig.views.map((v) => [v.name, v.sha256]),
   }));
   return h.digest('hex');
 }
@@ -373,7 +352,7 @@ export function detectRigs(
 ): DetectedRig[] {
   const folders = indexFolders(pngs);
   const rigs: DetectedRig[] = [];
-  for (const group of groupSkeletons(skeletons, folders)) {
+  for (const group of groupSkeletons(skeletons)) {
     const files = [...group].sort((a, b) => a.abs.localeCompare(b.abs)).slice(0, MAX_VIEWS_PER_RIG);
     const names = viewNames(files.map((f) => basename(f.abs)));
     const views = files
@@ -438,7 +417,7 @@ export function detectRigs(
       skins: skinCount,
       baseFolderPath,
       baseFolderLabel: baseFolder ? label(baseFolder.f.names) : null,
-      hash: rigHash({ name, folderPath, baseFolderPath, views: views.map((v) => ({ name: v.name, text: v.file.text })) }),
+      hash: rigHash({ name, folderPath, baseFolderPath, views: views.map((v) => ({ name: v.name, sha256: v.file.sha256 })) }),
     });
   }
   return onePerFolder(rigs).sort((a, b) => a.name.localeCompare(b.name) || a.folderPath.join('/').localeCompare(b.folderPath.join('/')));
@@ -447,11 +426,13 @@ export function detectRigs(
 /**
  * A folder holds one rig. When several exports bind to the same folder (an
  * old 3.8 copy next to the 4.3 one), keep the one the preview can read, then
- * the one with the most views and images.
+ * the one named like the folder, then the one with the most views and images.
  */
 function onePerFolder(rigs: DetectedRig[]): DetectedRig[] {
   const score = (r: DetectedRig) => [
     rigVersionSupported(r) ? 1 : 0,
+    // `rabbit_*.json` over a goat that reuses the rabbit's part names.
+    r.name.toLowerCase().replace(/[^a-z0-9]+/g, '-') === r.folderPath[r.folderPath.length - 1] ? 1 : 0,
     r.views.length,
     new Set(r.views.flatMap((v) => v.file.images)).size,
   ];
@@ -491,7 +472,7 @@ export function batchRigs<T extends DetectedRig>(rigs: readonly T[], maxBytes = 
   let cur: T[] = [];
   let bytes = 0;
   for (const r of rigs) {
-    const size = r.views.reduce((n, v) => n + v.file.text.length, 0);
+    const size = r.views.reduce((n, v) => n + v.file.size, 0);
     if (cur.length > 0 && (cur.length >= MAX_RIGS_PER_REQUEST || bytes + size > maxBytes)) {
       out.push(cur);
       cur = [];

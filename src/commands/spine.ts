@@ -6,6 +6,7 @@
  * sent (hash remembered in `.magicpixel/state.json`).
  */
 import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import kleur from 'kleur';
 
@@ -98,13 +99,17 @@ export async function runSpineRigs(opts: SpineRunOpts = {}): Promise<SpineRunOut
     const record: Record<string, string> = {};
     for (const batch of batchRigs([...pending])) {
       try {
-        const results = await upload(batch.map((r) => ({
+        const payload = await Promise.all(batch.map(async (r) => ({
           name: r.name,
           folderPath: r.folderPath,
           baseFolderPath: r.baseFolderPath,
-          views: r.views.map((v) => ({ name: v.name, json: v.file.json })),
+          views: await Promise.all(r.views.map(async (v) => ({
+            name: v.name,
+            json: JSON.parse(await readFile(v.file.abs, 'utf8')) as unknown,
+          }))),
           hash: r.hash,
         })));
+        const results = await upload(payload);
         batch.forEach((rig, i) => {
           const res = results[i]?.name === rig.name ? results[i] : results.find((x) => x?.name === rig.name);
           const status: SpineRigStatus = res?.status ?? 'error';
@@ -168,6 +173,15 @@ export async function syncSpineRigsQuietly(opts: {
   try {
     const outcome = await (opts.run ?? runSpineRigs)({ config: opts.config, gameIndex: opts.gameIndex, dryRun: opts.dryRun });
     if (opts.quiet) return outcome;
+    if (outcome.skeletons > 0 && outcome.rigs.length === 0 && !warnedThisProcess) {
+      // Say why no preview appears instead of staying silent.
+      warnedThisProcess = true;
+      console.log();
+      console.log(kleur.dim(
+        `${icon('tip')} Found ${outcome.skeletons} Spine skeleton export${outcome.skeletons === 1 ? '' : 's'}, but no synced folder holds their part PNGs. Run \`${'npx @magicpixelart/cli spine --dry-run'}\` for details.`,
+      ));
+      return outcome;
+    }
     const lines = outcome.rigs.filter((o) => {
       if (opts.verbose) return true;
       if (o.status === 'saved') return true;

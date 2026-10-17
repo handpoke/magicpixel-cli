@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-10-17
+
+### Fixed
+- Spine rigs in big games: every skeleton export is scanned (0.6.3 stopped at 200, which could miss the main character's rig).
+- Only files named as views of one character (`rabbit_front`, `rabbit_side`, `rabbit_back`) become one rig; unrelated exports in the same folder no longer merge.
+- When two rigs match the same folder, the one named like the folder wins (`rabbit` over a goat that reuses the rabbit's parts).
+- Sync says when it finds Spine exports but no synced folder for them, instead of staying silent.
+
 ## [0.6.3] - 2026-10-17
 
 ### Added
