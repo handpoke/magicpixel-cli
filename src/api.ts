@@ -670,6 +670,68 @@ export async function pushSpritesAdaptive(
   }
 }
 
+// ---------- Spine rigs (skeleton exports → library preview) -----------------
+
+/** One rig for `POST /api/public/integration/spine`. */
+export interface PushSpineRig {
+  name: string;
+  /** Library folder slugs, the same segments push sends in a sprite's `path`. */
+  folderPath: string[];
+  baseFolderPath: string[] | null;
+  views: { name: string; json: unknown }[];
+  hash: string;
+}
+
+export type SpineRigStatus = 'saved' | 'unchanged' | 'missing-folder' | 'error';
+
+export interface SpineRigResult {
+  name: string;
+  status: SpineRigStatus;
+  error?: string;
+}
+
+const DEFAULT_SPINE_ENDPOINT = 'https://magicpixel.art/api/public/integration/spine';
+
+export function resolveSpineEndpoint(): string {
+  const override = process.env.MAGICPIXEL_SPINE_ENDPOINT?.trim();
+  return override ? validateEndpointUrl(override) : DEFAULT_SPINE_ENDPOINT;
+}
+
+/** Upload up to 10 rigs; the server attaches each to its library folder. */
+export async function pushSpineRigs(rigs: PushSpineRig[], retryOpts?: RetryOpts): Promise<SpineRigResult[]> {
+  const url = resolveSpineEndpoint();
+  return retryTransient('spine', async () => {
+    const { headers, requestId } = buildHeaders({ 'Content-Type': 'application/json' });
+    const res = await safeFetch(
+      url,
+      { method: 'POST', headers, body: JSON.stringify({ rigs }) },
+      { timeoutMs: ASSET_TIMEOUT_MS },
+    );
+    const serverRequestId = res.headers.get('x-request-id') ?? requestId;
+    if (res.ok) {
+      const data = (await res.json()) as { results?: unknown } | null;
+      const results = data && typeof data === 'object' ? data.results : undefined;
+      if (!Array.isArray(results)) {
+        throw new ApiError(
+          502,
+          withRequestId('spine: unexpected server response shape (results missing).', serverRequestId),
+          serverRequestId,
+        );
+      }
+      return results as SpineRigResult[];
+    }
+    const bodyText = await res.text();
+    const errorCode = errorCodeFromResponse(res);
+    throw new ApiError(
+      res.status,
+      withRequestId(friendlyApiError(res.status, bodyText, 'spine', errorCode), serverRequestId),
+      serverRequestId,
+      retryAfterMsFromResponse(res),
+      errorCode,
+    );
+  }, retryOpts);
+}
+
 // ---------- folder resync (local folder is the source of truth) -------------
 
 export function resolveResyncEndpoint(): string {

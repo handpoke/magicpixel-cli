@@ -115,6 +115,7 @@ Run `magicpixel --help` for a short "Common tasks" list. A folder isn't syncing?
 | `sync [...flags]` | Two-way: pull MagicPixel edits and push changed game sprites. |
 | `push [--dry-run] [--flatten]` | Upload local PNG edits (and connected game sprites) back to MagicPixel. |
 | `resync <folder> [--dry-run] [-y]` | Local files win for one folder: overwrite MagicPixel copies, move cloud-only files to Trash. |
+| `spine [--dry-run] [--force]` | Find Spine skeleton exports and attach them to their synced part folders, so MagicPixel shows the animated preview. Also runs after every `sync`. |
 | `connect <glob>` | Limit which game folders sync (default is all sprites on Unity/Godot/GameMaker). |
 | `search <query>` | Search indexed game PNGs (no network). |
 | `add <glob>` / `remove <glob>` | Manage `include` patterns. |
@@ -185,6 +186,21 @@ npx @magicpixelart/cli@latest start      # or: magicpixel consolidate
 - Old per-folder setups are merged, backed up to `.magicpixel/backup/`, and removed; stray copies of game files are deleted.
 - Run any command from a game folder and it uses the root setup. Folder names you type are read from where you are: `sync --only Runtime` inside `kr-core` means `kr-core/Runtime`.
 - Add a folder later with `magicpixel connect "kr-puzzle/**"`.
+
+## Spine rigs (animated preview)
+
+`sync` (and `start`) look for Spine skeleton exports (`.json`, Spine 4.3) anywhere in your game folders — also in folders that aren't synced, like packed `RemoteBundleAssets` — and match them to synced folders by part file name (a `head_front` attachment ↔ `head_front.png`):
+
+```
+⬆️ Spine rig rabbit (front, side, back) → rabbit/ (509 skins), parts fallback rabbit-pixel/
+```
+
+- Skeletons in one directory that share parts (`rabbit_front/side/back.json`) become one rig with a view each.
+- A folder whose PNGs are mostly the rig's parts is a skin; when several skins sit side by side the rig is attached to their parent, so every skin gets the preview.
+- The folder outside it holding most parts (`rabbit-pixel/`) fills in parts a skin lacks.
+- Only changed rigs are uploaded (hash kept in `.magicpixel/state.json`). A failed upload only warns; sync carries on.
+
+Run `magicpixel spine --dry-run` to see what would be attached.
 
 ## Plain output
 

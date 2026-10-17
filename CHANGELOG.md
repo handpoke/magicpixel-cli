@@ -5,6 +5,15 @@ All notable changes to `@magicpixelart/cli` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [0.6.3] - 2026-10-17
+
+### Added
+- Spine rigs attach themselves: `sync` and `start` find Spine 4.3 skeleton exports in your game folders, match them to the synced part folders by file name, and upload them so MagicPixel shows the animated preview (e.g. `Spine rig rabbit (front, side, back) → rabbit/ (509 skins), parts fallback rabbit-pixel/`). Only changed rigs are sent; a failed upload never fails the sync.
+- `magicpixel spine [--dry-run] [--force]` runs that detection on its own and prints what it found.
+- `MAGICPIXEL_SPINE_ENDPOINT` overrides the rig upload endpoint (testing only).
+
 ## [0.6.2] - 2026-10-10
 
 ### Fixed

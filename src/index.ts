@@ -16,6 +16,7 @@ import { repairCommand } from './commands/repair.js';
 import { startCommand } from './commands/start.js';
 import { connectCommand } from './commands/connect.js';
 import { resyncCommand } from './commands/resync.js';
+import { spineCommand } from './commands/spine.js';
 import { searchCommand } from './commands/search.js';
 import { whyCommand } from './commands/why.js';
 import { consolidateCommand } from './commands/consolidate.js';
@@ -166,6 +167,14 @@ program
   .option('--dry-run', 'Show what would change without sending anything')
   .addHelpText('after', '\nExamples:\n  $ magicpixel resync Sprites/Enemies --dry-run\n  $ magicpixel resync Sprites/Enemies\n')
   .action(wrap("resync", async (folder: string, opts) => resyncCommand(resolveInvokedPath(folder), opts as Parameters<typeof resyncCommand>[1])));
+
+program
+  .command('spine')
+  .description('Find Spine skeleton exports and attach them to their part folders in MagicPixel (also runs on every sync)')
+  .option('--dry-run', 'Show the rigs found without uploading anything')
+  .option('--force', 'Upload every rig, even ones unchanged since the last upload')
+  .addHelpText('after', '\nExamples:\n  $ magicpixel spine --dry-run\n  $ magicpixel spine\n')
+  .action(wrap("spine", async (opts) => spineCommand(opts as { dryRun?: boolean; force?: boolean })));
 
 program
   .command('connect <glob>')
