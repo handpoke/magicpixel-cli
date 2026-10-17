@@ -159,7 +159,7 @@ describe('view grouping and names', () => {
   });
 
   it('keeps unrelated skeletons in one folder apart', () => {
-    const mk = (abs: string, images: string[]): SkeletonFile => ({ abs, rel: abs, text: '{}', json: {}, spineVersion: '4.3.1', images });
+    const mk = (abs: string, images: string[]): SkeletonFile => ({ abs, rel: abs, sha256: 'x', size: 2, spineVersion: '4.3.1', images });
     const pngs: SyncedPng[] = [
       ...['bat_wing', 'bat_body'].map((name) => ({ folder: ['enemies', 'bat'], folderNames: ['Enemies', 'bat'], name })),
       ...['slime_body', 'slime_eye'].map((name) => ({ folder: ['enemies', 'slime'], folderNames: ['Enemies', 'slime'], name })),
@@ -169,6 +169,25 @@ describe('view grouping and names', () => {
       ['enemy_bat', 'enemies/bat'],
       ['enemy_slime', 'enemies/slime'],
     ]);
+  });
+});
+
+describe('a big game', () => {
+  it('finds the rabbit among hundreds of exports and ignores look-alikes', async () => {
+    const root = krRepo();
+    const kr = join(root, 'kr-remote-bundles');
+    // Hundreds of other exports sorted after the rabbit's, like KR's skins.
+    for (let i = 0; i < 260; i++) put(join(kr, 'Editor', 'RemoteBundleAssets', `zz${i}`, `zz${i}.json`), JSON.stringify(skeleton([`zz${i}_a`])));
+    // A props folder: unrelated exports side by side, and a goat drawn from the rabbit's parts.
+    const props = join(kr, 'Runtime', 'Resources', 'Spine');
+    for (const view of ['front', 'side', 'back']) put(join(props, `goat_${view}.json`), JSON.stringify(skeleton(viewParts(view))));
+    put(join(props, 'carrot.json'), JSON.stringify(skeleton(['head_front', 'carrot'])));
+    put(join(props, 'glyph_bug.json'), JSON.stringify(skeleton(['bug'])));
+    const { pngs, found } = await scan(root);
+    expect(found.skeletons.length).toBeGreaterThan(260);
+    const rigs = detectRigs(found.skeletons, pngs, root);
+    const onRabbit = rigs.filter((r) => r.folderPath.join('/') === 'spineraw/rabbit');
+    expect(onRabbit.map((r) => [r.name, r.views.map((v) => v.name)])).toEqual([['rabbit', ['front', 'side', 'back']]]);
   });
 });
 
@@ -204,12 +223,12 @@ describe('folder matching', () => {
   });
 
   it('skips rigs whose images no synced folder holds', () => {
-    const s: SkeletonFile = { abs: '/x/hero.json', rel: 'hero.json', text: '{}', json: {}, spineVersion: '4.3.1', images: ['cape'] };
+    const s: SkeletonFile = { abs: '/x/hero.json', rel: 'hero.json', sha256: 'x', size: 2, spineVersion: '4.3.1', images: ['cape'] };
     expect(detectRigs([s], [{ folder: ['ui'], folderNames: ['UI'], name: 'logo' }], '/')).toEqual([]);
   });
 
   it('binds to the best single folder when skins do not share a parent', () => {
-    const s: SkeletonFile = { abs: '/x/hero.json', rel: 'hero.json', text: '{}', json: {}, spineVersion: '4.3.1', images: ['a', 'b', 'c', 'd'] };
+    const s: SkeletonFile = { abs: '/x/hero.json', rel: 'hero.json', sha256: 'x', size: 2, spineVersion: '4.3.1', images: ['a', 'b', 'c', 'd'] };
     const pngs: SyncedPng[] = [
       ...['a', 'b', 'c', 'd'].map((name) => ({ folder: ['chars', 'hero'], folderNames: ['Chars', 'Hero'], name })),
       ...['a', 'b', 'x'].map((name) => ({ folder: ['misc'], folderNames: ['Misc'], name })),
@@ -287,7 +306,7 @@ describe('upload and hash skipping', () => {
   });
 
   it('batches at most 10 rigs per request', () => {
-    const rigs = Array.from({ length: 23 }, (_, i) => ({ name: `r${i}`, views: [{ file: { text: 'x' } }] })) as never[];
+    const rigs = Array.from({ length: 23 }, (_, i) => ({ name: `r${i}`, views: [{ file: { size: 1 } }] })) as never[];
     expect(batchRigs(rigs).map((b) => b.length)).toEqual([10, 10, 3]);
     expect(batchRigs(rigs, 2).map((b) => b.length)).toEqual(Array(12).fill(2).slice(0, 11).concat([1]));
   });
