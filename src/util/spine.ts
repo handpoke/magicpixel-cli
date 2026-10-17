@@ -341,6 +341,20 @@ export function rigHash(rig: Pick<DetectedRig, 'name' | 'folderPath' | 'baseFold
 
 const label = (names: readonly string[]) => `${names[names.length - 1]}/`;
 
+/** Folder-name key: `container_item`, `Container Item` and `container-item` all read `containeritem`. */
+const folderKey = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+/**
+ * Folder names a rig's parts are likely kept under, best first: the rig name,
+ * then the rig name past its first word (King Rabbit's `glyph_heart.json`
+ * draws the parts in `heart/`). Not the skeleton's directory: that is often
+ * generic (`base/`).
+ */
+export function rigFolderNames(rigName: string): string[] {
+  const rest = rigName.replace(/^[^_\-. ]+[_\-. ]+/, '');
+  return [...new Set([folderKey(rigName), folderKey(rest)])].filter(Boolean);
+}
+
 /**
  * Turns skeleton files + the synced PNGs into rigs bound to library folders.
  * Rigs whose images match no synced folder are left out.
@@ -361,12 +375,27 @@ export function detectRigs(
     const keys = new Set(files.flatMap((f) => f.images.map(imageKey)));
     if (keys.size === 0) continue;
 
-    // Skin folders: mostly made of this rig's images.
-    const skins: { f: FolderInfo; hits: number }[] = [];
-    for (const f of folders.values()) {
-      const hits = countIn(f.pngs, keys);
-      if (hits > 0 && hits >= SKIN_SHARE * f.pngs.size) skins.push({ f, hits });
+    const name = rigName(files.map((f) => basename(f.abs)), basename(dirname(files[0].abs)));
+
+    // Skin folders: a folder named like the rig (or one directly below it)
+    // that holds any of its images, else folders mostly made of its images.
+    // Part names alone are too generic for props (`shadow`, `glow`, `base`):
+    // `bubble` would bind to `Environment/`, `mushrooms` to `turret/`.
+    const inFolders = (keep: (f: FolderInfo, hits: number) => boolean) => {
+      const out: { f: FolderInfo; hits: number }[] = [];
+      for (const f of folders.values()) {
+        const hits = countIn(f.pngs, keys);
+        if (hits > 0 && keep(f, hits)) out.push({ f, hits });
+      }
+      return out;
+    };
+    let skins: { f: FolderInfo; hits: number }[] = [];
+    for (const key of rigFolderNames(name)) {
+      const named = (segments: readonly string[]) => segments.length > 0 && folderKey(segments[segments.length - 1]) === key;
+      skins = inFolders((f) => named(f.segments) || named(f.segments.slice(0, -1)));
+      if (skins.length) break;
     }
+    if (skins.length === 0) skins = inFolders((f, hits) => hits >= SKIN_SHARE * f.pngs.size);
     if (skins.length === 0) continue;
 
     // Several skin folders side by side → bind to their parent (`rabbit/`).
@@ -405,7 +434,6 @@ export function detectRigs(
     }
     if (baseFolder && baseFolder.hits < COVER_SHARE * keys.size) baseFolder = null;
 
-    const name = rigName(files.map((f) => basename(f.abs)), basename(dirname(files[0].abs)));
     const baseFolderPath = baseFolder?.f.segments ?? null;
     rigs.push({
       name,

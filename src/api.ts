@@ -697,28 +697,27 @@ export function resolveSpineEndpoint(): string {
   return override ? validateEndpointUrl(override) : DEFAULT_SPINE_ENDPOINT;
 }
 
-/** Upload up to 10 rigs; the server attaches each to its library folder. */
-export async function pushSpineRigs(rigs: PushSpineRig[], retryOpts?: RetryOpts): Promise<SpineRigResult[]> {
+/** POST to the spine endpoint; returns the parsed JSON body. */
+async function postSpine(body: unknown, retryOpts?: RetryOpts): Promise<Record<string, unknown>> {
   const url = resolveSpineEndpoint();
   return retryTransient('spine', async () => {
     const { headers, requestId } = buildHeaders({ 'Content-Type': 'application/json' });
     const res = await safeFetch(
       url,
-      { method: 'POST', headers, body: JSON.stringify({ rigs }) },
+      { method: 'POST', headers, body: JSON.stringify(body) },
       { timeoutMs: ASSET_TIMEOUT_MS },
     );
     const serverRequestId = res.headers.get('x-request-id') ?? requestId;
     if (res.ok) {
-      const data = (await res.json()) as { results?: unknown } | null;
-      const results = data && typeof data === 'object' ? data.results : undefined;
-      if (!Array.isArray(results)) {
+      const data = (await res.json()) as unknown;
+      if (!data || typeof data !== 'object' || !Array.isArray((data as { results?: unknown }).results)) {
         throw new ApiError(
           502,
           withRequestId('spine: unexpected server response shape (results missing).', serverRequestId),
           serverRequestId,
         );
       }
-      return results as SpineRigResult[];
+      return data as Record<string, unknown>;
     }
     const bodyText = await res.text();
     const errorCode = errorCodeFromResponse(res);
@@ -730,6 +729,20 @@ export async function pushSpineRigs(rigs: PushSpineRig[], retryOpts?: RetryOpts)
       errorCode,
     );
   }, retryOpts);
+}
+
+/** Upload up to 10 rigs; the server attaches each to its library folder. */
+export async function pushSpineRigs(rigs: PushSpineRig[], retryOpts?: RetryOpts): Promise<SpineRigResult[]> {
+  return (await postSpine({ rigs }, retryOpts)).results as SpineRigResult[];
+}
+
+/**
+ * Take this CLI's rigs off folders it no longer binds them to. Returns the
+ * folder paths (`a/b`) the server cleared; an older server clears none.
+ */
+export async function removeSpineRigs(folderPaths: string[][], retryOpts?: RetryOpts): Promise<string[]> {
+  const data = await postSpine({ rigs: [], remove: folderPaths }, retryOpts);
+  return Array.isArray(data.removed) ? data.removed.filter((p): p is string => typeof p === 'string') : [];
 }
 
 // ---------- folder resync (local folder is the source of truth) -------------

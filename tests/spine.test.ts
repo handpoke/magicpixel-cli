@@ -241,6 +241,37 @@ describe('folder matching', () => {
   });
 });
 
+describe('props with generic part names', () => {
+  const prop = (name: string, images: string[]): SkeletonFile => ({ abs: `/x/${name}.json`, rel: `${name}.json`, sha256: 'x', size: 2, spineVersion: '4.3.1', images });
+  const pngs = (folder: string[], names: string[]): SyncedPng[] => names.map((name) => ({ folder, folderNames: folder, name }));
+
+  it('binds to the folder named like the rig, not the one made of the same part names', () => {
+    const [rig] = detectRigs([prop('bubble', ['shadow', 'glow'])], [
+      ...pngs(['environment'], ['shadow', 'glow']),
+      ...pngs(['bubble'], ['shadow', 'glow', 'bubble_a', 'bubble_b', 'bubble_c']),
+    ], '/');
+    expect(rig.folderPath).toEqual(['bubble']);
+  });
+
+  it('matches folder names however they are written, skins below included', () => {
+    const [rig] = detectRigs([prop('container_item', ['shadow', 'lid'])], [
+      ...pngs(['bubble'], ['shadow', 'lid']),
+      ...pngs(['container-item', 'wood'], ['shadow', 'lid', 'x', 'y', 'z']),
+      ...pngs(['container-item', 'gold'], ['shadow', 'lid', 'x', 'y', 'z']),
+    ], '/');
+    expect(rig.folderPath).toEqual(['container-item']);
+    expect(rig.skins).toBe(2);
+  });
+
+  it('falls back to the name past the first word, after the full name', () => {
+    const heart = detectRigs([prop('glyph_heart', ['icon'])], [...pngs(['glyph'], ['icon']), ...pngs(['heart'], ['icon', 'a', 'b'])], '/');
+    expect(heart[0].folderPath).toEqual(['heart']);
+    // portal_ground's own folder wins over ground/.
+    const portal = detectRigs([prop('portal_ground', ['rim'])], [...pngs(['ground'], ['rim']), ...pngs(['portal-ground'], ['rim', 'a', 'b'])], '/');
+    expect(portal[0].folderPath).toEqual(['portal-ground']);
+  });
+});
+
 describe('upload and hash skipping', () => {
   let root: string;
   const cwd0 = process.cwd();
@@ -289,6 +320,28 @@ describe('upload and hash skipping', () => {
     await runSpineRigs({ config, cwd: root, upload });
     await runSpineRigs({ config, cwd: root, upload });
     expect(upload).toHaveBeenCalledTimes(2);
+  });
+
+  it('takes rigs off folders an earlier upload bound them to', async () => {
+    const upload = okUpload();
+    await runSpineRigs({ config, cwd: root, upload });
+    const statePath = join(root, '.magicpixel', 'state.json');
+    const state = JSON.parse(readFileSync(statePath, 'utf8'));
+    state.spineRigs.environment = 'old-hash';
+    writeFileSync(statePath, JSON.stringify(state));
+
+    const dry = await runSpineRigs({ config, cwd: root, upload, dryRun: true, remove: vi.fn() });
+    expect(dry.removed).toEqual(['environment']);
+
+    const failing = vi.fn(async () => { throw new Error('offline'); });
+    await runSpineRigs({ config, cwd: root, upload, remove: failing });
+    expect(JSON.parse(readFileSync(statePath, 'utf8')).spineRigs.environment).toBe('old-hash');
+
+    const remove = vi.fn(async (paths: string[][]) => paths.map((p) => p.join('/')));
+    const r = await runSpineRigs({ config, cwd: root, upload, remove });
+    expect(remove).toHaveBeenCalledWith([['environment']]);
+    expect(r.removed).toEqual(['environment']);
+    expect(Object.keys(JSON.parse(readFileSync(statePath, 'utf8')).spineRigs).sort()).toEqual(['spineraw/rabbit', 'spineraw/ring/gold']);
   });
 
   it('dry run sends nothing', async () => {
