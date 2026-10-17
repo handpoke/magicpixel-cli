@@ -11,7 +11,7 @@ import { resolve } from 'node:path';
 import kleur from 'kleur';
 
 import { loadConfig, loadState, saveState, type MagicPixelConfig } from '../config.js';
-import { ApiError, pushSpineRigs, type SpineRigStatus } from '../api.js';
+import { ApiError, pushSpineRigs, removeSpineRigs, type SpineRigStatus } from '../api.js';
 import { detectProjectKind, isEngineKind, readWorkspaceMembers } from '../util/framework.js';
 import { indexGamePngs, matchConnectGlobs, type GameIndex } from '../util/gameScan.js';
 import {
@@ -40,6 +40,8 @@ export interface SpineRunOutcome {
   skeletons: number;
   rigs: SpineRigOutcome[];
   skippedFiles: { rel: string; reason: string }[];
+  /** Folders (`a/b`) whose earlier rig was taken off because nothing binds to them now. */
+  removed: string[];
 }
 
 export interface SpineRunOpts {
@@ -50,8 +52,9 @@ export interface SpineRunOpts {
   /** Reuse the game index a sync already built. */
   gameIndex?: GameIndex;
   cwd?: string;
-  /** Test seam. */
+  /** Test seams. */
   upload?: typeof pushSpineRigs;
+  remove?: typeof removeSpineRigs;
 }
 
 /** Folders to look for skeleton exports in: each game folder of a workspace, else the setup folder. */
@@ -64,7 +67,7 @@ export function skeletonRoots(cwd: string): string[] {
 
 export async function runSpineRigs(opts: SpineRunOpts = {}): Promise<SpineRunOutcome> {
   const cwd = opts.cwd ?? process.cwd();
-  const empty: SpineRunOutcome = { skeletons: 0, rigs: [], skippedFiles: [] };
+  const empty: SpineRunOutcome = { skeletons: 0, rigs: [], skippedFiles: [], removed: [] };
   const config = opts.config ?? (await loadConfig(cwd));
   const kind = await detectProjectKind(cwd);
   if (!isEngineKind(kind)) return empty;
@@ -94,9 +97,9 @@ export async function runSpineRigs(opts: SpineRunOpts = {}): Promise<SpineRunOut
     }
   }
 
+  const record: Record<string, string> = {};
   if (!opts.dryRun && pending.size > 0) {
     const upload = opts.upload ?? pushSpineRigs;
-    const record: Record<string, string> = {};
     for (const batch of batchRigs([...pending])) {
       try {
         const payload = await Promise.all(batch.map(async (r) => ({
@@ -121,14 +124,37 @@ export async function runSpineRigs(opts: SpineRunOpts = {}): Promise<SpineRunOut
         for (const rig of batch) outcomes.set(rig, { rig, status: 'error', error: message });
       }
     }
-    if (Object.keys(record).length > 0) {
-      // Re-read: the push that just ran saved its own state.
-      const fresh = await loadState(cwd);
-      fresh.spineRigs = { ...(fresh.spineRigs ?? {}), ...record };
-      await saveState(fresh, cwd);
+  }
+
+  // Folders an earlier upload bound a rig to that no rig binds to now (an
+  // export was deleted, or better matching moved it): take those rigs off, so
+  // the preview doesn't show one object's rig on another's parts. Skipped when
+  // nothing was detected at all, which is more likely a broken scan.
+  const bound = new Set(rigs.map((r) => r.folderPath.join('/')));
+  const stale = rigs.length ? Object.keys(state.spineRigs ?? {}).filter((k) => !bound.has(k)) : [];
+  let removed: string[] = [];
+  if (!opts.dryRun && stale.length > 0) {
+    try {
+      removed = await (opts.remove ?? removeSpineRigs)(stale.map((k) => k.split('/')));
+    } catch {
+      /* tried again next run */
     }
   }
-  return { skeletons: found.skeletons.length, rigs: rigs.map((r) => outcomes.get(r)!), skippedFiles: found.skipped };
+
+  if (Object.keys(record).length > 0 || removed.length > 0) {
+    // Re-read: the push that just ran saved its own state.
+    const fresh = await loadState(cwd);
+    const next = { ...(fresh.spineRigs ?? {}), ...record };
+    for (const k of removed) if (!bound.has(k)) delete next[k];
+    fresh.spineRigs = next;
+    await saveState(fresh, cwd);
+  }
+  return {
+    skeletons: found.skeletons.length,
+    rigs: rigs.map((r) => outcomes.get(r)!),
+    skippedFiles: found.skipped,
+    removed: opts.dryRun ? stale : removed,
+  };
 }
 
 function spineErrorMessage(e: unknown): string {
@@ -235,6 +261,9 @@ export async function spineCommand(opts: { dryRun?: boolean; force?: boolean } =
     return;
   }
   for (const o of outcome.rigs) console.log(formatSpineOutcome(o));
+  for (const k of outcome.removed) {
+    console.log(`${icon(opts.dryRun ? 'ghost' : 'ok')} ${kleur.dim(`${opts.dryRun ? 'Would take' : 'Took'} the old Spine rig off ${k}/`)}`);
+  }
   if (opts.dryRun) {
     console.log();
     console.log(ui.dryRun());

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-10-17
+
+### Fixed
+- Spine rigs bind to the folder named like them (`bubble.json` → `bubble/`, `glyph_heart.json` → `heart/`) before falling back to matching part names, which are too generic for props (`bubble` had bound to `Environment/`, `mushrooms` to `turret/`).
+- A rig an earlier upload bound to a folder that no rig binds to now is taken off that folder, so one object's rig no longer shows on another's parts. `spine --dry-run` lists these.
+
 ## [0.6.4] - 2026-10-17
 
 ### Fixed
