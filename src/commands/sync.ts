@@ -30,6 +30,7 @@ import { canSkipWithoutHashing, decidePull, hasNewExplicitRelease } from '../uti
 import { hasUnpushedLocalEdit } from '../util/localEdit.js';
 import { shouldReconcile } from '../util/reconcile.js';
 import { runPush, type PushSummary } from './push.js';
+import { syncSpineRigsQuietly } from './spine.js';
 import { claimResyncRequest, reportResyncRequest } from '../api.js';
 import { runResync } from './resync.js';
 import { keyInScope, pathInScope, resolveSyncScope, scopeFingerprint } from '../util/syncScope.js';
@@ -1691,9 +1692,18 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     if (!runOpts.watchMode && !isPlain()) console.log(kleur.dim(syncFooterHint()));
   }
 
+  // Spine skeleton exports → animated preview in MagicPixel. Watchers check
+  // once per run (the scan reads every .json head); never fails the sync.
+  if (config.push !== false && (!runOpts.watchMode || !spineCheckedThisProcess)) {
+    spineCheckedThisProcess = true;
+    await syncSpineRigsQuietly({ config, gameIndex: fullGameIndex, verbose, quiet: !live });
+  }
+
   if (result.failed) process.exitCode = 1;
   return { ...result, pushed, ...(strays ? { strays } : {}) };
 }
+
+let spineCheckedThisProcess = false;
 
 async function maybePushLocalSprites(
   pushEnabled: boolean | undefined,

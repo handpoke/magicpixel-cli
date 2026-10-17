@@ -116,6 +116,8 @@ export interface SyncState {
   projectId?: string;
   /** Fingerprint of the `--only` scope the cursor belongs to. */
   syncScope?: string;
+  /** Spine rigs last uploaded: library folder path (`spineraw/rabbit`) → rig hash. */
+  spineRigs?: Record<string, string>;
 }
 
 /**
@@ -139,6 +141,7 @@ export function resetStateIfProjectChanged(
     delete state.assets;
     delete state.manifestEtags;
     delete state.lastReconcile;
+    delete state.spineRigs;
   }
   state.projectId = projectId;
   return stale;

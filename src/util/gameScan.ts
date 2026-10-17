@@ -70,7 +70,7 @@ export function gameScanRoot(kind: ProjectKind): string | null {
   }
 }
 
-function shouldSkipDir(name: string): boolean {
+export function shouldSkipDir(name: string): boolean {
   const n = name.toLowerCase();
   if (GAME_SCAN_SKIP_DIRS.has(n)) return true;
   if (GAME_SCAN_SKIP_HIDDEN.has(n)) return true;
