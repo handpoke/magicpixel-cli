@@ -385,6 +385,41 @@ export async function runPushWith(
     }
   }
 
+  // An artboard deleted in MagicPixel: forget the dead link and send the file
+  // again as new, the way a file new on disk goes up, so the watcher never
+  // stops to ask for a `sync` it can do itself.
+  const goneCandidates = goneArtboardCandidates(results, candidates);
+  if (goneCandidates.length > 0) {
+    const byRel = indexSyncedBySourceRel(synced);
+    for (const c of goneCandidates) {
+      const k = resolveSyncedKey(c, synced, byRel);
+      if (k) delete synced[k];
+    }
+    const readopt: PushSprite[] = [];
+    for (const a of planPush(goneCandidates, synced, { folderTreeKeys })) {
+      if (a.kind !== 'adopt') continue;
+      const abs = absByKey.get(a.key);
+      if (!abs) continue;
+      await assertSafeIoPath(abs, cwdAbs);
+      readopt.push({
+        key: a.key, pngBase64: (await readFile(abs)).toString('base64'), diskSha256: shaByKey.get(a.key)!,
+        path: a.path, pathNames: a.pathNames, name: a.name,
+      });
+    }
+    const readoptResults = readopt.length > 0 ? await pushSpritesAdaptive(readopt) : [];
+    synced = await commitPushResults({
+      synced,
+      batchResults: readoptResults,
+      candidates,
+      sourceByKey,
+      shaByKey,
+      fpByKey,
+      outDir: config.outDir,
+    });
+    await saveState({ ...state, synced });
+    replaceResultsByKey(results, readoptResults);
+  }
+
   // Remember the live cloud sha a refusal reported, so a later `push` (with or
   // without --force) has a baseline the concurrency check accepts. The manifest
   // hash can be absent for big documents, which used to dead-end this path.
@@ -501,6 +536,15 @@ export function forcedRetrySprites(
 }
 
 /** Overwrite the earlier outcome for every retried key, in place. */
+/** Local files whose artboard was deleted in MagicPixel (refused as `not-found`). */
+export function goneArtboardCandidates<C extends { key: string }>(
+  results: readonly PushResult[],
+  candidates: readonly C[],
+): C[] {
+  const gone = new Set(results.filter((r) => r.status === 'conflict' && r.reason === 'not-found').map((r) => r.key));
+  return gone.size === 0 ? [] : candidates.filter((c) => gone.has(c.key));
+}
+
 export function replaceResultsByKey(results: PushResult[], updates: readonly PushResult[]): void {
   for (const u of updates) {
     const i = results.findIndex((r) => r.key === u.key);
@@ -593,7 +637,7 @@ function conflictHint(reason?: string): string {
     case 'legacy-document':
       return 'document predates layer storage — open and save it once in MagicPixel.';
     case 'not-found':
-      return `artboard no longer exists in MagicPixel — run \`${cmd('sync')}\` to refresh.`;
+      return 'artboard no longer exists in MagicPixel, and sending it again as a new file did not go through.';
     default:
       return `conflict — review both copies, then press the artboard's Sync button to use MagicPixel's copy.`;
   }

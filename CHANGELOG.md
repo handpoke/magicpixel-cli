@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- `push` and `sync --watch`: a local edit whose artboard was deleted in MagicPixel is sent again as a new file instead of asking you to run `sync`.
+
 ## [0.6.5] - 2026-10-17
 
 ### Fixed

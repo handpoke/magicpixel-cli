@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { forcedRetrySprites, replaceResultsByKey, rememberRefusedCloudShas } from '../src/commands/push.js';
+import { forcedRetrySprites, goneArtboardCandidates, replaceResultsByKey, rememberRefusedCloudShas } from '../src/commands/push.js';
 import type { PushResult, PushSprite } from '../src/api.js';
 import type { SyncedSprite } from '../src/config.js';
 
@@ -114,5 +114,17 @@ describe('forcedRetrySprites — editor saves', () => {
   it('still forces game-written and unknown-source files', () => {
     expect(forcedRetrySprites([conflict({ lastWriteSource: 'game' })], byKey, false)).toHaveLength(1);
     expect(forcedRetrySprites([conflict()], byKey, false)).toHaveLength(1);
+  });
+});
+
+describe('goneArtboardCandidates', () => {
+  it('picks the local files whose artboard was deleted in MagicPixel', () => {
+    const candidates = [{ key: 'a' }, { key: 'b' }, { key: 'c' }];
+    expect(goneArtboardCandidates([
+      { key: 'a', status: 'conflict', reason: 'not-found' },
+      { key: 'b', status: 'conflict', reason: 'cloud-changed' },
+      { key: 'c', status: 'updated' },
+    ] as PushResult[], candidates)).toEqual([{ key: 'a' }]);
+    expect(goneArtboardCandidates([], candidates)).toEqual([]);
   });
 });
