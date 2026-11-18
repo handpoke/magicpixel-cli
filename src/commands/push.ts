@@ -551,13 +551,14 @@ export function rememberRefusedDiskShas(
 ): boolean {
   let changed = false;
   for (const r of results) {
-    if (r.status !== 'conflict' && r.status !== 'error') continue;
+    // A failed request is not a refusal: the watcher must try those bytes again.
+    if ((r.status !== 'conflict' && r.status !== 'error') || r.transient) continue;
     const prev = synced[r.key];
     const disk = shaByKey.get(r.key);
     if (!prev || !disk) continue;
     const reason = r.status === 'conflict' ? r.reason : 'error';
     if (prev.refusedDiskSha256 === disk && prev.refusedReason === reason) continue;
-    synced[r.key] = { ...prev, refusedDiskSha256: disk, ...(reason ? { refusedReason: reason } : {}) };
+    synced[r.key] = { ...prev, refusedDiskSha256: disk, refusedReason: reason };
     changed = true;
   }
   return changed;

@@ -572,6 +572,9 @@ export interface PushResult {
   /** Adopt only: the key the manifest will use. Differs from the disk key when
    *  the server's slug/collision handling renamed the document. */
   cloudKey?: string;
+  /** `error` only: the request failed (5xx/429 after retries), not MagicPixel's
+   *  answer about this sprite, so the same bytes are worth sending again. */
+  transient?: boolean;
 }
 
 /** CLI send size. The server allows 20; smaller batches survive Worker 502s. */
@@ -651,7 +654,7 @@ export async function pushSpritesAdaptive(
   } catch (e) {
     if (!isTransientPushError(e)) throw e;
     if (sprites.length === 1) {
-      return [{ key: sprites[0].key, status: 'error', message: (e as Error).message }];
+      return [{ key: sprites[0].key, status: 'error', message: (e as Error).message, transient: true }];
     }
     const mid = Math.ceil(sprites.length / 2);
     const left = await pushSpritesAdaptive(sprites.slice(0, mid), retryOpts);
@@ -664,6 +667,7 @@ export async function pushSpritesAdaptive(
         key: s.key,
         status: 'error' as const,
         message: (rightErr as Error).message,
+        transient: true,
       }));
       return [...left, ...right];
     }

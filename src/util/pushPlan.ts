@@ -201,12 +201,14 @@ export function planPush(
         out.push({ kind: 'skip', key: c.key, reason: 'legacy' });
         continue;
       }
-      if (opts.skipRefused && !opts.replace && known.refusedDiskSha256 === c.diskSha256) {
-        out.push({ kind: 'refused', key: c.key, ...(known.refusedReason ? { reason: known.refusedReason } : {}) });
-        continue;
-      }
+      // Before the refused check: `start` offers to flatten every needs-flatten
+      // sprite, a refused one included.
       if (!opts.flatten && typeof known.layers === 'number' && known.layers > 1) {
         out.push({ kind: 'needs-flatten', key: c.key, layers: known.layers });
+        continue;
+      }
+      if (opts.skipRefused && !opts.replace && known.refusedDiskSha256 === c.diskSha256) {
+        out.push({ kind: 'refused', key: c.key, ...(known.refusedReason ? { reason: known.refusedReason } : {}) });
         continue;
       }
       out.push({

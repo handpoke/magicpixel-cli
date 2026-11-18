@@ -26,6 +26,29 @@ describe('refused sprites are not re-sent by sync', () => {
     )).toBe(false);
   });
 
+  it('a failed request is not a refusal, so the watcher sends those bytes again', () => {
+    const synced: Record<string, SyncedSprite> = { 'items/saw/skull': row() };
+    expect(rememberRefusedDiskShas(
+      synced,
+      [{ key: 'items/saw/skull', status: 'error', message: '502', transient: true }],
+      new Map([['items/saw/skull', 'disk-new']]),
+    )).toBe(false);
+    expect(synced['items/saw/skull'].refusedDiskSha256).toBeUndefined();
+  });
+
+  it('a new refusal without a reason drops the old reason', () => {
+    const synced: Record<string, SyncedSprite> = { 'items/saw/skull': row({ refusedDiskSha256: 'disk-old', refusedReason: 'cloud-changed' }) };
+    rememberRefusedDiskShas(synced, [{ key: 'items/saw/skull', status: 'conflict' }], new Map([['items/saw/skull', 'disk-new']]));
+    expect(synced['items/saw/skull'].refusedReason).toBeUndefined();
+  });
+
+  it('a refused multi-layer sprite is still offered for flattening', () => {
+    const synced = { 'items/saw/skull': row({ layers: 3, refusedDiskSha256: 'disk-new', refusedReason: 'would-flatten' }) };
+    expect(planPush([candidate('disk-new')], synced, { skipRefused: true })[0]).toEqual(
+      { kind: 'needs-flatten', key: 'items/saw/skull', layers: 3 },
+    );
+  });
+
   it('a watcher tick holds the same bytes back, with the reason', () => {
     const synced = { 'items/saw/skull': row({ refusedDiskSha256: 'disk-new', refusedReason: 'cloud-changed' }) };
     expect(planPush([candidate('disk-new')], synced, { skipRefused: true })).toEqual([
