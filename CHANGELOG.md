@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-11-18
+
+### Fixed
+- The watcher no longer re-sends a sprite MagicPixel already refused (changed in both places, a multi-layer artboard, a rejected PNG) on every check, which kept it saying "Uploading 3 sprites…". It lists each one once with the reason and sends it again when the file on disk changes; `push` and `push --force` still send it.
+- After pulling some of the artboards you synced, the watcher says how many others were already up to date in your game, and the idle line no longer reads "0 up to date".
+
 ## [0.6.5] - 2026-10-17
 
 ### Fixed

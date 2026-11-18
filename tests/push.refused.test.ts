@@ -44,3 +44,15 @@ describe('refused sprites are not re-sent by sync', () => {
     expect(planPush([candidate('disk-new')], synced, { skipRefused: true, replace: true })[0].kind).toBe('update');
   });
 });
+
+import { watchIdleLine, watchUnchangedLine } from '../src/commands/sync.js';
+
+describe('watch lines', () => {
+  it('never says "0 up to date"', () => {
+    expect(watchIdleLine(0)).toBe('Watching · all in sync');
+    expect(watchIdleLine(3)).toBe('Watching · all in sync (3 up to date)');
+  });
+  it('names the sprites a pull found already in the game', () => {
+    expect(watchUnchangedLine(3)).toBe('= 3 already up to date in your game');
+  });
+});

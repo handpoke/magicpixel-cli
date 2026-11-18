@@ -381,9 +381,14 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
             `change${changedCount === 1 ? '' : 's'} from MagicPixel:`,
         );
         printChanges(r, /* indent */ '  ');
+        // A Sync press on several artboards where only some changed: say the
+        // rest were already in the game, instead of leaving them unmentioned.
+        if (r.unchanged > 0) {
+          console.log(kleur.dim(`  ${watchUnchangedLine(r.unchanged)}`));
+        }
       } else {
         if (canRedraw()) {
-          process.stdout.write(`\r\x1b[2K${kleur.dim(fitStatusLine(`${timestamp()} ${icon('watch')} Watching · all in sync (${r.unchanged.toLocaleString('en-US')} up to date)`, process.stdout.columns))}`);
+          process.stdout.write(`\r\x1b[2K${kleur.dim(fitStatusLine(`${timestamp()} ${icon('watch')} ${watchIdleLine(r.unchanged)}`, process.stdout.columns))}`);
         }
       }
     } catch (e) {
@@ -504,6 +509,18 @@ function isNetworkError(err: Error): boolean {
     /fetch failed/i.test(msg) ||
     /\b(502|504)\b.*\b(bad gateway|gateway timeout)\b/i.test(msg)
   );
+}
+
+/** "= 3 already up to date": sprites in this check the game already has. */
+export function watchUnchangedLine(unchanged: number): string {
+  return `= ${unchanged.toLocaleString('en-US')} already up to date in your game`;
+}
+
+/** Idle status: a count only when this check looked at sprites (never "0 up to date"). */
+export function watchIdleLine(unchanged: number): string {
+  return unchanged > 0
+    ? `Watching · all in sync (${unchanged.toLocaleString('en-US')} up to date)`
+    : 'Watching · all in sync';
 }
 
 /**
