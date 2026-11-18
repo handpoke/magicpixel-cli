@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.7] - 2026-11-18
+
 ### Fixed
 - A sprite whose upload failed because MagicPixel was briefly unreachable is sent again on the next check, instead of being held back like a sprite MagicPixel refused.
 - A multi-layer sprite the watcher held back is still listed when `start` offers to replace multi-layer artboards with your local files.
