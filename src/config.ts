@@ -84,6 +84,14 @@ export interface SyncedSprite {
   /** Current cloud baseline observed during an unresolved dual edit. */
   pendingCloudSha256?: string;
   /**
+   * Disk sha MagicPixel refused (conflict or error) the last time it was sent,
+   * and why. While the file still holds these bytes, `sync` and the watcher
+   * don't send it again: the answer would be the same, and re-sending it on
+   * every tick kept the watcher "Uploading" forever. `push` still sends it.
+   */
+  refusedDiskSha256?: string;
+  refusedReason?: string;
+  /**
    * `pixel_art_assets.updated_at` of the row this baseline came from. Lets a
    * sync prove a hash-less (legacy / uncached) row is unchanged without
    * spending a conditional download per file.

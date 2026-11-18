@@ -29,6 +29,8 @@ export interface PushCandidate {
 
 export type PushAction =
   | { kind: 'skip'; key: string; reason?: 'unchanged' | 'legacy' | 'unusable-path' }
+  /** Same bytes MagicPixel already refused; `refusedReason` says why. */
+  | { kind: 'refused'; key: string; reason?: string }
   | { kind: 'needs-flatten'; key: string; layers: number }
   | {
       kind: 'update';
@@ -162,7 +164,13 @@ export function applyDiskFingerprints(
 export function planPush(
   candidates: readonly PushCandidate[],
   synced: Record<string, SyncedSprite> | undefined,
-  opts: { flatten?: boolean; folderTreeKeys?: ReadonlySet<string>; replace?: boolean } = {},
+  opts: {
+    flatten?: boolean;
+    folderTreeKeys?: ReadonlySet<string>;
+    replace?: boolean;
+    /** sync / watch: don't re-send bytes MagicPixel already refused. */
+    skipRefused?: boolean;
+  } = {},
 ): PushAction[] {
   const state = synced ?? {};
   const byRel = indexSyncedBySourceRel(state);
@@ -191,6 +199,10 @@ export function planPush(
       // duplicate art that already exists in the library.
       if (known.legacy) {
         out.push({ kind: 'skip', key: c.key, reason: 'legacy' });
+        continue;
+      }
+      if (opts.skipRefused && !opts.replace && known.refusedDiskSha256 === c.diskSha256) {
+        out.push({ kind: 'refused', key: c.key, ...(known.refusedReason ? { reason: known.refusedReason } : {}) });
         continue;
       }
       if (!opts.flatten && typeof known.layers === 'number' && known.layers > 1) {

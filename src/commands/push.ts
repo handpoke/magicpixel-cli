@@ -228,15 +228,24 @@ export async function runPushWith(
   for (const k of absByKey.keys()) {
     if (sourceByKey.has(k)) folderTreeKeys.add(k);
   }
-  const actions = planPush(candidates, state.synced, { flatten: opts.flatten, folderTreeKeys, replace: opts.replace });
+  const actions = planPush(candidates, state.synced, {
+    flatten: opts.flatten,
+    folderTreeKeys,
+    replace: opts.replace,
+    skipRefused: opts.nestedSync === true && !opts.force,
+  });
+  const refused = actions.filter((a) => a.kind === 'refused');
   const skipped = actions.filter((a) => a.kind === 'skip' && a.reason !== 'legacy').length;
   const legacy = actions.filter((a) => a.kind === 'skip' && a.reason === 'legacy');
   const flattenBlocked = actions.filter((a) => a.kind === 'needs-flatten');
   const sendable = actions.filter((a) => a.kind === 'update' || a.kind === 'adopt');
-  const preIssues = skipIssues(
-    legacy,
-    flattenBlocked.map((a) => ({ key: a.key, ...('layers' in a && typeof a.layers === 'number' ? { layers: a.layers } : {}) })),
-  );
+  const preIssues = [
+    ...skipIssues(
+      legacy,
+      flattenBlocked.map((a) => ({ key: a.key, ...('layers' in a && typeof a.layers === 'number' ? { layers: a.layers } : {}) })),
+    ),
+    ...refused.map((a) => ({ key: a.key, text: refusalHint('reason' in a ? a.reason : undefined) })),
+  ];
   spinner?.succeed(
     `Local sprites: ${candidates.length} · to push ${sendable.length} · unchanged ${skipped}` +
       (matched.entries.length ? ` · connected ${matched.entries.length}` : ''),
@@ -388,7 +397,8 @@ export async function runPushWith(
   // Remember the live cloud sha a refusal reported, so a later `push` (with or
   // without --force) has a baseline the concurrency check accepts. The manifest
   // hash can be absent for big documents, which used to dead-end this path.
-  if (rememberRefusedCloudShas(synced, results)) {
+  const rememberedCloud = rememberRefusedCloudShas(synced, results);
+  if (rememberRefusedDiskShas(synced, results, shaByKey) || rememberedCloud) {
     await saveState({ ...state, synced });
   }
 
@@ -529,6 +539,37 @@ export function rememberRefusedCloudShas(
 }
 
 
+/**
+ * Record the disk bytes MagicPixel refused for each sprite, so `sync` and the
+ * watcher stop re-sending them every tick. A later success rewrites the row
+ * without these fields; new bytes on disk no longer match them.
+ */
+export function rememberRefusedDiskShas(
+  synced: Record<string, SyncedSprite>,
+  results: readonly PushResult[],
+  shaByKey: ReadonlyMap<string, string>,
+): boolean {
+  let changed = false;
+  for (const r of results) {
+    if (r.status !== 'conflict' && r.status !== 'error') continue;
+    const prev = synced[r.key];
+    const disk = shaByKey.get(r.key);
+    if (!prev || !disk) continue;
+    const reason = r.status === 'conflict' ? r.reason : 'error';
+    if (prev.refusedDiskSha256 === disk && prev.refusedReason === reason) continue;
+    synced[r.key] = { ...prev, refusedDiskSha256: disk, ...(reason ? { refusedReason: reason } : {}) };
+    changed = true;
+  }
+  return changed;
+}
+
+/** One line for a sprite held back because MagicPixel refused these bytes. */
+export function refusalHint(reason?: string): string {
+  if (reason === 'error' || !reason) {
+    return `MagicPixel refused this file — run \`${cmd('push')}\` to see why and try again.`;
+  }
+  return conflictHint(reason);
+}
 
 async function commitPushResults(opts: {
   synced: Record<string, SyncedSprite>;
