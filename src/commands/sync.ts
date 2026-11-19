@@ -115,6 +115,11 @@ interface SyncResult {
   pushed?: PushSummary | null;
   /** Game-owned sprites skipped because they belong to another game folder. */
   strays?: { count: number; owner: string | null };
+  /**
+   * The manifest held only rows changed since the last check, so `unchanged`
+   * counts sprites this check was about. On a full pass it counts the library.
+   */
+  incremental?: boolean;
 }
 
 /** Did the push half of a run actually move bytes into MagicPixel? */
@@ -383,7 +388,8 @@ async function watchLoop(opts: SyncOpts): Promise<void> {
         printChanges(r, /* indent */ '  ');
         // A Sync press on several artboards where only some changed: say the
         // rest were already in the game, instead of leaving them unmentioned.
-        if (r.unchanged > 0) {
+        // Not on a full pass, where the count is the whole library.
+        if (r.incremental && r.unchanged > 0) {
           console.log(kleur.dim(`  ${watchUnchangedLine(r.unchanged)}`));
         }
       } else {
@@ -1325,6 +1331,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       bytesIn: 0,
       bytesSaved,
       conflicts,
+      incremental: Boolean(since),
     };
   }
 
@@ -1338,6 +1345,7 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
     bytesIn: 0,
     bytesSaved,
     conflicts,
+    incremental: Boolean(since),
   };
 
   let progress: Ora | null = null;
