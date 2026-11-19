@@ -9,6 +9,7 @@ import {
 } from './util/security.js';
 import { authHeaders } from './util/authHeaders.js';
 import { cmd } from './util/invoke.js';
+import type { SpriteBorder } from './util/unityMeta.js';
 
 export interface ManifestEntry {
   id: string;
@@ -50,7 +51,7 @@ export interface ManifestEntry {
   game?: boolean;
   /** 9-slice guides set on the artboard (insets in pixels). Unity projects
    *  get them as the sprite border. Absent when the artboard has none. */
-  border?: { left: number; top: number; right: number; bottom: number };
+  border?: SpriteBorder;
 }
 
 export interface ManifestProjectInfo {

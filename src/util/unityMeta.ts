@@ -195,11 +195,14 @@ const SINGLE_SPRITE = /^[ \t]*spriteMode: 1\b/m;
  * The meta with this sprite border (Unity order: x left, y bottom, z right,
  * w top) and a Full Rect mesh, which Unity needs to draw a bordered sprite
  * tiled. Every other line stays as it is. `null` when the meta is not a
- * single-sprite TextureImporter, which this never rewrites.
+ * single-sprite TextureImporter, which this never rewrites, or the border is
+ * not whole pixels.
  */
 export function withSpriteBorder(meta: string, border: SpriteBorder): string | null {
   if (!SINGLE_SPRITE.test(meta) || !BORDER_LINE.test(meta) || !MESH_LINE.test(meta)) return null;
   const { left, top, right, bottom } = border;
+  // Whole pixels only: anything else from the manifest never reaches the YAML.
+  if (![left, top, right, bottom].every((v) => Number.isInteger(v) && v >= 0)) return null;
   return meta
     .replace(BORDER_LINE, `$1spriteBorder: {x: ${left}, y: ${bottom}, z: ${right}, w: ${top}}`)
     .replace(MESH_LINE, '$1spriteMeshType: 0');

@@ -81,6 +81,12 @@ describe('sprite borders', () => {
     expect(withSpriteBorder(multi, { left: 1, top: 1, right: 1, bottom: 1 })).toBeNull();
   });
 
+  it('writes whole pixels only', () => {
+    expect(withSpriteBorder(base, { left: 1.5, top: 1, right: 1, bottom: 1 })).toBeNull();
+    expect(withSpriteBorder(base, { left: -1, top: 1, right: 1, bottom: 1 })).toBeNull();
+    expect(withSpriteBorder(base, { left: '1}' as unknown as number, top: 1, right: 1, bottom: 1 })).toBeNull();
+  });
+
   it('writes only when the border differs and keeps a custom pivot', async () => {
     const dir = tmp();
     const png = join(dir, 'panel.png');
