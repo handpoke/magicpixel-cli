@@ -48,6 +48,9 @@ export interface ManifestEntry {
   /** Lives in a connected (game-synced) folder — the PNG belongs to a game
    *  file, so it must never be copied into an unrelated folder's outDir. */
   game?: boolean;
+  /** 9-slice guides set on the artboard (insets in pixels). Unity projects
+   *  get them as the sprite border. Absent when the artboard has none. */
+  border?: { left: number; top: number; right: number; bottom: number };
 }
 
 export interface ManifestProjectInfo {

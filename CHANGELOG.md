@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Unity: an artboard's 9-slice guides from MagicPixel become the sprite's border in its `.meta` (with a Full Rect mesh, so Tiled draw mode works). Only those two lines change; pivot, pixels per unit and every other importer setting stay, and a sprite whose artboard has no guides is never touched.
+
 ## [0.6.7] - 2026-11-18
 
 ### Fixed

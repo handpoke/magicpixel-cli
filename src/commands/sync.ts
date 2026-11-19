@@ -16,7 +16,7 @@ import { assertPathInsideRoot, assertSafeIoPath } from '../util/security.js';
 import { detectProjectKind, isEngineKind } from '../util/framework.js';
 import { describeExcluded, indexGamePngs, matchConnectGlobs, countingSpritesText, type GameIndex, type ScanProgress } from '../util/gameScan.js';
 import { aliasCollisionKeys, collectSourceRelMap, isPathInside, syncDiskPathFromKey } from '../util/syncPath.js';
-import { DEFAULT_UNITY_PPU, writeMissingUnityMetas } from '../util/unityMeta.js';
+import { DEFAULT_UNITY_PPU, writeMissingUnityMetas, writeUnitySpriteBorders } from '../util/unityMeta.js';
 import { filterUnityManifest, isWorkingSetEntry, partitionWithheldEntries, shouldPruneDeselectedEntry, workingSetPullKeys } from '../util/unityFilter.js';
 import { selectFullSyncOrphans } from '../util/prunePolicy.js';
 import { runTmpJanitor } from '../util/tmpJanitor.js';
@@ -1454,6 +1454,23 @@ async function runOnce(opts: SyncOpts, runOpts: RunOpts = {}): Promise<SyncResul
       console.log(
         kleur.yellow(
           `  ! ${meta.failed} .meta file${meta.failed === 1 ? '' : 's'} could not be written — Unity will use default import settings.`,
+        ),
+      );
+    }
+    // 9-slice guides from the editor become the sprite border. Runs for every
+    // bordered entry, not only downloads: moving a guide changes no pixels.
+    const borders = await writeUnitySpriteBorders(
+      manifest.flatMap((entry) => (entry.border ? [{ pngPath: pathFor(entry), border: entry.border }] : [])),
+    );
+    if (verbose && borders.written > 0) {
+      console.log(
+        kleur.dim(`  unity → ${borders.written} sprite border${borders.written === 1 ? '' : 's'} set`),
+      );
+    }
+    if (borders.failed > 0) {
+      console.log(
+        kleur.yellow(
+          `  ! ${borders.failed} sprite border${borders.failed === 1 ? '' : 's'} could not be written to ${borders.failed === 1 ? 'its' : 'their'} .meta.`,
         ),
       );
     }

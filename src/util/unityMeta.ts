@@ -14,7 +14,7 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 
 export const DEFAULT_UNITY_PPU = 32;
 
@@ -173,6 +173,63 @@ export async function writeMissingUnityMetas(
     } catch {
       // Non-fatal: Unity generates its own default .meta on import. Counted
       // so `sync` can surface a single warning line instead of failing.
+      result.failed++;
+    }
+  }
+  return result;
+}
+
+/** 9-slice insets in pixels from the manifest (`border`), measured from each edge. */
+export interface SpriteBorder {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+const BORDER_LINE = /^([ \t]*)spriteBorder: \{[^}\r\n]*\}/m;
+const MESH_LINE = /^([ \t]*)spriteMeshType: \d+/m;
+const SINGLE_SPRITE = /^[ \t]*spriteMode: 1\b/m;
+
+/**
+ * The meta with this sprite border (Unity order: x left, y bottom, z right,
+ * w top) and a Full Rect mesh, which Unity needs to draw a bordered sprite
+ * tiled. Every other line stays as it is. `null` when the meta is not a
+ * single-sprite TextureImporter, which this never rewrites.
+ */
+export function withSpriteBorder(meta: string, border: SpriteBorder): string | null {
+  if (!SINGLE_SPRITE.test(meta) || !BORDER_LINE.test(meta) || !MESH_LINE.test(meta)) return null;
+  const { left, top, right, bottom } = border;
+  return meta
+    .replace(BORDER_LINE, `$1spriteBorder: {x: ${left}, y: ${bottom}, z: ${right}, w: ${top}}`)
+    .replace(MESH_LINE, '$1spriteMeshType: 0');
+}
+
+export interface UnityBorderSprite {
+  /** Absolute path of the synced PNG. */
+  pngPath: string;
+  border: SpriteBorder;
+}
+
+/**
+ * Write each sprite's 9-slice border (set on its artboard in MagicPixel) into
+ * its `.meta`. Only the border and mesh-type lines change, and only when they
+ * differ, so pivot, pixels per unit and every other importer setting the user
+ * chose in Unity stay. A sprite without a border in the manifest is never
+ * touched, so a border set by hand in Unity survives.
+ */
+export async function writeUnitySpriteBorders(sprites: UnityBorderSprite[]): Promise<UnityMetaResult> {
+  const result: UnityMetaResult = { written: 0, failed: 0 };
+  for (const sprite of sprites) {
+    const metaPath = `${sprite.pngPath}.meta`;
+    if (!existsSync(metaPath)) continue;
+    try {
+      const meta = await readFile(metaPath, 'utf8');
+      const next = withSpriteBorder(meta, sprite.border);
+      if (next === null || next === meta) continue;
+      await writeFile(metaPath, next);
+      result.written++;
+    } catch {
       result.failed++;
     }
   }
